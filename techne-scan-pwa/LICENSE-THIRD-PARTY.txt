@@ -1,0 +1,9 @@
+QR Code for JavaScript by Kazuhiko Arase (2009), MIT License.
+Source: http://www.d-project.com/
+The QR encoder included in vendor/qr.js was bundled from qrcode-terminal's vendor/QRCode directory.
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+Code 128 bar patterns in code128.js are adapted from JsBarcode by Johan Lindell and contributors, MIT License.
+https://github.com/lindell/JsBarcode

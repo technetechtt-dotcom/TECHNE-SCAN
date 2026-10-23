@@ -1,0 +1,16 @@
+{
+  "name": "techne-scan-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node src/index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.3.14",
+    "express": "^4.21.2",
+    "pg": "^8.16.0"
+  }
+}
