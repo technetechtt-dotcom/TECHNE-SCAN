@@ -1,4 +1,4 @@
-const CACHE = "techne-scan-v4";
+const CACHE = "techne-scan-v6";
 const ASSETS = ["./","./index.html","./app.js","./ops.js","./i18n.js","./queue.js","./styles.css","./manifest.webmanifest","./vendor/qr.js","./icons/icon.svg","./idb.js","./api.js","./code128.js"];
 
 self.addEventListener("install", (event) => {

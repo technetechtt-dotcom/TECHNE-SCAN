@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { confirmDemoCheckout, startCheckout } from "../src/billing.js";
 import { cancelStocktake, reopenStocktake } from "../src/counts.js";
 import { parseScanCsv } from "../src/csv.js";
 import { closeDb, initDb, query } from "../src/db.js";
@@ -13,10 +14,13 @@ import {
   approveStocktake,
   checkoutAsset,
   checkinAsset,
+  createDevice,
   createEmployee,
+  createImport,
   createStocktake,
   DEMO_PASSWORD,
   listAssets,
+  listDevices,
   login,
   overdueNotices,
   reconciliation,
@@ -162,5 +166,20 @@ test("tenant isolation, ledger approval, and scheduled counts", async () => {
   await checkoutAsset(admin, free.id, { person: "Wrong Name", employeeCode: code[0].public_id, due: "2026-11-02", acknowledgement: "Techne Admin" });
   const issued = (await listAssets(admin)).find((item) => item.id === free.id);
   assert.equal(issued.holder, "Techne Admin");
+
+  await assert.rejects(() => createDevice(admin, { name: "Belt scanner", kind: "Bluetooth", branchId: admin.branchId }), /Wireless/);
+  const opn = (await listDevices(admin)).find((item) => item.kind === "OPN-2001");
+  await assert.rejects(
+    () => createImport(admin, { name: "Locked batch", deviceId: opn.id, records: [{ barcode: "IT-001", quantity: 1 }], branchId: admin.branchId }),
+    /Counter/,
+  );
+  await createDevice(admin, { name: "Stores phone", kind: "Phone", branchId: admin.branchId });
+  const checkout = await startCheckout(admin, { plan: "counter" });
+  assert.equal(checkout.mode, "demo");
+  assert.equal(checkout.plan.label, "R499.00");
+  const subscribed = await confirmDemoCheckout(admin, { checkoutId: checkout.checkoutId });
+  assert.equal(subscribed.plan, "counter");
+  await createImport(admin, { name: "Counter batch", deviceId: opn.id, records: [{ barcode: "IT-001", quantity: 1 }], branchId: admin.branchId });
+  await assert.rejects(() => createDevice(admin, { name: "Belt scanner", kind: "Bluetooth", branchId: admin.branchId }), /Wireless/);
   await closeDb();
 });

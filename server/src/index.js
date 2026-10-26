@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
+import { applyStripeEvent } from "./billing.js";
 import { databaseMode, initDb } from "./db.js";
 import { bad } from "./errors.js";
 import { alertError, log, rateLimit, runIdempotent } from "./guard.js";
@@ -52,7 +53,12 @@ app.use((req, res, next) => {
   if (req.url.startsWith("/api/v1/")) req.url = req.url.replace(/^\/api\/v1/, "/api");
   next();
 });
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({
+  limit: "1mb",
+  verify: (req, _res, buf) => {
+    req.rawBody = buf;
+  },
+}));
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "no-referrer");
@@ -148,6 +154,14 @@ app.post("/api/invitations/accept", async (req, res, next) => {
     requireClient(req);
     await rateLimit(`invite:${clientIp(req)}`, 8, 60 * 60 * 1000);
     res.json(await acceptInvitation(req.body || {}));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/billing/stripe", async (req, res, next) => {
+  try {
+    res.json(await applyStripeEvent(req.rawBody || Buffer.from(""), req.get("stripe-signature")));
   } catch (error) {
     next(error);
   }

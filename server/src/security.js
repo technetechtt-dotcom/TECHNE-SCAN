@@ -26,6 +26,13 @@ export function assertCap(user, cap) {
   if (!capsFor(user.role).includes(cap)) throw bad(403, "You do not have permission for that.");
 }
 
+export function assertFreshMfa(user) {
+  if (process.env.NODE_ENV !== "production") return;
+  if ((user.role === "owner" || user.role === "admin") && !user.mfaEnabled) {
+    throw bad(403, "Turn on an authenticator before this action.");
+  }
+}
+
 export async function hashPassword(password) {
   const salt = randomBytes(16).toString("hex");
   const buf = await scrypt(password, salt, 64);

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { query, tx } from "./db.js";
+import { assertScannerAllowed, billingView } from "./billing.js";
 import { bad } from "./errors.js";
 import { explainLine } from "./reconcile.js";
 import { parseScanCsv } from "./csv.js";
@@ -55,6 +56,7 @@ function mapUser(row) {
     role: row.role,
     caps: capsFor(row.role),
     mfaEnabled: Boolean(row.mfa_enabled),
+    sessionId: row.session_id || null,
   };
 }
 
@@ -259,7 +261,7 @@ export async function createSession(employeeId, userAgent = "") {
 export async function userForToken(token) {
   if (!token) return null;
   const rows = await query(
-    `SELECT e.*, c.name AS company_name, c.timezone, b.name AS branch_name
+    `SELECT e.*, c.name AS company_name, c.timezone, b.name AS branch_name, s.id AS session_id
      FROM sessions s
      JOIN employees e ON e.id = s.employee_id
      JOIN companies c ON c.id = e.company_id
@@ -274,6 +276,34 @@ export async function userForToken(token) {
     [hashToken(token)],
   );
   return mapUser(rows[0]);
+}
+
+export async function listSessions(user) {
+  const rows = await query(
+    `SELECT id, user_agent, created_at, last_seen_at, expires_at FROM sessions
+     WHERE employee_id = $1 AND revoked_at IS NULL AND expires_at > now()
+     ORDER BY last_seen_at DESC`,
+    [user.id],
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    userAgent: row.user_agent || "",
+    current: row.id === user.sessionId,
+    createdAt: iso(row.created_at),
+    lastSeenAt: iso(row.last_seen_at),
+    expiresAt: iso(row.expires_at),
+  }));
+}
+
+export async function revokeOtherSessions(user) {
+  if (!user.sessionId) throw bad(401, "Sign in required.");
+  const rows = await query(
+    `UPDATE sessions SET revoked_at = now()
+     WHERE employee_id = $1 AND id <> $2 AND revoked_at IS NULL
+     RETURNING id`,
+    [user.id, user.sessionId],
+  );
+  return { revoked: rows.length };
 }
 
 export async function logout(token) {
@@ -1314,7 +1344,8 @@ export async function createDevice(user, input) {
   const branchId = await ownedBranch(query, user, input.branchId || user.branchId);
   const name = clip(input.name, 80, "Device name");
   const kind = String(input.kind || "");
-  if (!["OPN-2001", "Phone", "USB", "Bluetooth", "Other"].includes(kind)) throw bad(400, "Choose a device type.");
+  if (!["OPN-2001", "Phone", "USB", "Bluetooth", "Wireless", "Other"].includes(kind)) throw bad(400, "Choose a device type.");
+  await assertScannerAllowed(user.companyId, kind);
   const serial = optionalText(input.serial, 80);
   const id = maybeUuid(input.id) || randomUUID();
   const firmware = optionalText(input.firmware, 40);
@@ -1370,8 +1401,9 @@ export async function createImport(user, input) {
   let deviceId = null;
   if (input.deviceId) {
     deviceId = asUuid(input.deviceId, "Device");
-    const devices = await query(`SELECT id FROM devices WHERE id = $1 AND company_id = $2 AND branch_id = $3`, [deviceId, user.companyId, branchId]);
+    const devices = await query(`SELECT id, kind FROM devices WHERE id = $1 AND company_id = $2 AND branch_id = $3`, [deviceId, user.companyId, branchId]);
     if (!devices[0]) throw bad(400, "Choose a device at this branch.");
+    await assertScannerAllowed(user.companyId, devices[0].kind);
     await query(`UPDATE devices SET last_seen_at = now(), updated_at = now() WHERE id = $1`, [deviceId]);
   }
   const id = maybeUuid(input.id) || randomUUID();
@@ -1380,8 +1412,11 @@ export async function createImport(user, input) {
     await query(`UPDATE devices SET firmware = $1, last_seen_at = now() WHERE id = $2`, [optionalText(input.firmware, 40), deviceId]);
   }
   if (!deviceId && input.serial) {
-    const found = await query(`SELECT id FROM devices WHERE company_id = $1 AND lower(serial) = lower($2)`, [user.companyId, optionalText(input.serial, 80)]);
-    if (found[0]) deviceId = found[0].id;
+    const found = await query(`SELECT id, kind FROM devices WHERE company_id = $1 AND lower(serial) = lower($2)`, [user.companyId, optionalText(input.serial, 80)]);
+    if (found[0]) {
+      deviceId = found[0].id;
+      await assertScannerAllowed(user.companyId, found[0].kind);
+    }
   }
   let rows;
   try {
@@ -1412,6 +1447,10 @@ export async function applyImport(user, id, input) {
     const bundle = await stocktakeBundle(q, user, stocktakeId);
     if (bundle.row.status !== "active") throw bad(409, "Apply scans to an open count.");
     if (bundle.row.branch_id !== imports[0].branch_id) throw bad(400, "The count and the import are at different branches.");
+    if (imports[0].device_id) {
+      const device = await q(`SELECT kind FROM devices WHERE id = $1 AND company_id = $2`, [imports[0].device_id, user.companyId]);
+      if (device[0]) await assertScannerAllowed(user.companyId, device[0].kind);
+    }
     const totals = new Map();
     for (const record of imports[0].records || []) {
       const key = String(record.barcode || "").trim().toLowerCase();
@@ -1492,6 +1531,26 @@ export async function markAllNotifications(user) {
   return { ok: true };
 }
 
+export async function listReservations(user) {
+  const params = [user.companyId];
+  let sql = `SELECT r.id, r.asset_id, r.person, r.starts_on, r.ends_on, r.status, a.name, a.public_id
+     FROM asset_reservations r JOIN assets a ON a.id = r.asset_id
+     WHERE r.company_id = $1 AND r.status = 'booked' AND r.ends_on >= CURRENT_DATE`;
+  sql += branchFilter(user, params, "a.branch_id");
+  sql += ` ORDER BY r.starts_on, a.name`;
+  const rows = await query(sql, params);
+  return rows.map((row) => ({
+    id: row.id,
+    assetId: row.asset_id,
+    assetName: row.name,
+    publicId: row.public_id,
+    person: row.person,
+    startsOn: dateOnly(row.starts_on),
+    endsOn: dateOnly(row.ends_on),
+    status: row.status,
+  }));
+}
+
 export async function pull(user) {
   const [branches, employees, assets, products, stocktakes, schedules, devices, imports, events, audits, notifications] = await Promise.all([
     listBranches(user),
@@ -1508,7 +1567,7 @@ export async function pull(user) {
   ]);
   return {
     serverTime: new Date().toISOString(),
-    company: { id: user.companyId, name: user.companyName, timezone: user.timezone },
+    company: { id: user.companyId, name: user.companyName, timezone: user.timezone, billing: await billingView(user.companyId) },
     branches,
     employees,
     assets,
@@ -1520,6 +1579,7 @@ export async function pull(user) {
     events,
     audits,
     notifications,
+    reservations: await listReservations(user),
     contractors: (await query(`SELECT id, name, company_name AS "companyName" FROM contractors WHERE company_id = $1 AND active ORDER BY name`, [user.companyId])),
   };
 }

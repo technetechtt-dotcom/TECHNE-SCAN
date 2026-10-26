@@ -25,7 +25,7 @@ let cameraTimer = null;
 let countTimer = null;
 
 function blank() {
-  return { branches: [], employees: [], assets: [], products: [], stocktakes: [], schedules: [], devices: [], imports: [], events: [], audits: [], notifications: [], contractors: [], company: null };
+  return { branches: [], employees: [], assets: [], products: [], stocktakes: [], schedules: [], devices: [], imports: [], events: [], audits: [], notifications: [], contractors: [], reservations: [], company: null };
 }
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 const allow = (cap) => Boolean(S.user?.caps?.includes(cap));
@@ -138,7 +138,7 @@ function assets() {
   const q = S.query.toLowerCase();
   const rows = S.data.assets.filter((asset) => `${asset.name} ${asset.publicId} ${asset.holder} ${asset.department}`.toLowerCase().includes(q));
   return header("Custody", "Assets", "Each asset gets a QR label and a Code 128 label the OPN-2001 can read.", (allow("assets") ? btn("+ Register", "new-asset", "green") + btn("Scan QR", "scan-qr") + btn("Check out", "new-checkout") + btn("Check in", "quick-checkin") : "")) +
-    `<section class="panel"><div class="toolbar"><input class="search" id="search" placeholder="Search asset, person, or department" value="${esc(S.query)}"><span class="muted">${rows.length} assets</span></div><div class="tablewrap"><table><thead><tr><th>Asset</th><th>ID</th><th>Branch</th><th>Custodian</th><th>Status</th><th></th></tr></thead><tbody>${rows.map((asset) => `<tr><td><strong>${esc(asset.name)}</strong><div class="smalls">${esc(asset.serial)}</div></td><td><span class="barcode">${esc(asset.publicId || "Pending sync")}</span></td><td>${esc(branchName(asset.branchId))}</td><td>${esc(asset.holder || "Unassigned")}</td><td>${asset.status === "out" && asset.due && asset.due < today() ? status("overdue") : status(asset.status)}</td><td><button class="smallbtn" data-act="asset:${asset.id}">Open</button></td></tr>`).join("")}</tbody></table></div></section>`;
+    `<section class="panel"><div class="toolbar"><input class="search" id="search" placeholder="Search asset, person, or department" value="${esc(S.query)}"><span class="muted">${rows.length} assets</span></div><div class="tablewrap"><table><thead><tr><th>Asset</th><th>ID</th><th>Branch</th><th>Custodian</th><th>Status</th><th></th></tr></thead><tbody>${rows.map((asset) => `<tr><td><strong>${esc(asset.name)}</strong><div class="smalls">${esc(asset.serial)}</div></td><td><span class="barcode">${esc(asset.publicId || "Pending sync")}</span></td><td>${esc(branchName(asset.branchId))}</td><td>${esc(asset.holder || "Unassigned")}</td><td>${asset.status === "out" && asset.due && asset.due < today() ? status("overdue") : status(asset.status)}</td><td><button class="smallbtn" data-act="asset:${asset.id}">Open</button></td></tr>`).join("")}</tbody></table></div></section><section class="panel"><h3>Bookings</h3>${(S.data.reservations || []).map((item) => `<div class="countrow"><div><strong>${esc(item.assetName)}</strong><div class="muted">${esc(item.person)} · ${esc(item.startsOn)} to ${esc(item.endsOn)}</div></div><span class="pill">${esc(item.status)}</span></div>`).join("") || empty("No open bookings", "A reservation holds the asset until the end date, then the server releases it.")}</section>`;
 }
 function inventory() {
   const q = S.query.toLowerCase();
@@ -168,9 +168,19 @@ function alerts() {
   return header("Notifications", "Alerts", "Assignments, overdue returns, and counts waiting for approval.", unread() ? btn("Mark all read", "read-all") : "") +
     `<section class="panel">${S.data.notifications.map((item) => `<div class="countrow"><div><strong>${esc(item.title)}</strong><div class="muted">${esc(item.body)} · ${fmt(item.createdAt)}</div></div><button class="smallbtn" data-act="open-note:${item.id}">${item.readAt ? "Open" : "Read"}</button></div>`).join("") || empty("No alerts", "Overdue assets and scheduled counts will notify you here.")}</section>`;
 }
+function scannerAllowed(kind) {
+  return (S.data.company?.billing?.scanners || ["Phone"]).includes(kind);
+}
+function planCards() {
+  const billing = S.data.company?.billing;
+  if (!billing) return "";
+  const current = billing.plans.find((plan) => plan.current)?.monthlyCents || 0;
+  return `<section class="panel"><h3>Scanner subscription · ${esc(billing.planName)}</h3><p class="muted">Phone scanning is included. A higher monthly plan unlocks more scanner types, and a locked scanner cannot be registered or used.</p>${billing.plans.map((plan) => `<div class="countrow"><div><strong>${esc(plan.name)} · ${esc(plan.label)} / month</strong><div class="muted">${esc(plan.summary)}</div><div class="smalls">${esc(plan.scanners.join(", "))}</div></div>${plan.current ? `<span class="pill green">Current</span>` : plan.monthlyCents > current && S.user.role === "owner" ? btn("Subscribe", `upgrade:${plan.id}`, "green") : ""}</div>`).join("")}</section>`;
+}
 function devices() {
-  return header("Hardware", "Devices", "Register each scanner before importing its file.", allow("devices") ? btn("+ Register device", "new-device", "green") : "") +
-    `<section class="panel"><div class="tablewrap"><table><thead><tr><th>Device</th><th>Type</th><th>Branch</th><th>Last import</th><th>Status</th></tr></thead><tbody>${S.data.devices.map((device) => `<tr><td><strong>${esc(device.name)}</strong><div class="smalls">${esc(device.serial)}</div></td><td>${esc(device.kind)}</td><td>${esc(branchName(device.branchId))}</td><td>${fmt(device.lastSeenAt)}</td><td>${status(device.status === "active" ? "available" : "completed")}</td></tr>`).join("")}</tbody></table>${S.data.devices.length ? "" : empty("No devices", "Register the OPN-2001 that will send CSV files.")}</div></section>`;
+  return header("Hardware", "Devices", "A scanner can be registered and used only when the company plan includes that type.", allow("devices") ? btn("+ Register device", "new-device", "green") : "") +
+    planCards() +
+    `<section class="panel"><div class="tablewrap"><table><thead><tr><th>Device</th><th>Type</th><th>Branch</th><th>Last import</th><th>Status</th></tr></thead><tbody>${S.data.devices.map((device) => `<tr><td><strong>${esc(device.name)}</strong><div class="smalls">${esc(device.serial)}</div></td><td>${esc(device.kind)}${scannerAllowed(device.kind) ? "" : ` <span class="pill orange">Locked</span>`}</td><td>${esc(branchName(device.branchId))}</td><td>${fmt(device.lastSeenAt)}</td><td>${status(device.status === "active" ? "available" : "completed")}</td></tr>`).join("")}</tbody></table>${S.data.devices.length ? "" : empty("No devices", "Register a phone on Starter, or subscribe before adding a USB, Opticon, or wireless scanner.")}</div></section>`;
 }
 function branches() {
   return header("Company", "Branches", `${esc(S.data.company?.name || S.user.companyName)} · ${esc(S.user.timezone)}`, btn("Company settings", "company") + btn("+ Branch", "new-branch", "green")) +
@@ -239,10 +249,14 @@ function modalHtml() {
   }
   if (S.modal === "new-branch") return formModal("New branch", "Branch codes are unique inside the company.", field("name", "Branch name", "text", "", "required") + field("code", "Code", "text", "", "required") + field("address", "Address"), "Create branch");
   if (S.modal === "new-employee") return formModal("New employee", "They will sign in with this email and password.", field("name", "Name", "text", "", "required") + field("email", "Email", "email", "", "required") + select("role", "Role", ["admin", "manager", "supervisor", "clerk", "viewer"].filter((role) => S.user.role === "owner" || role !== "admin").concat(S.user.role === "owner" ? ["owner"] : []).filter((role, index, list) => list.indexOf(role) === index).map((value) => ({ value, label: value }))) + branchOptions() + field("password", "Temporary password", "password", "", "required minlength=\"10\""), "Create login");
-  if (S.modal === "new-device") return formModal("Register a device", "Tie later CSV imports to this scanner.", branchOptions() + field("name", "Device name", "text", "", "required") + select("kind", "Type", ["OPN-2001", "USB", "Bluetooth", "Phone", "Other"].map((value) => ({ value, label: value }))) + field("serial", "Serial") + field("firmware", "Firmware"), "Save device");
-  if (S.modal === "import-csv") return formModal("Import scan CSV", "Rows are stored first. Apply them to an open count from the import list.", branchOptions() + select("deviceId", "Device", [{ value: "", label: "No device" }, ...S.data.devices.map((device) => ({ value: device.id, label: device.name }))]) + `<div class="field"><label for="f_file">CSV file</label><input id="f_file" name="file" type="file" accept=".csv,text/csv" required></div>`, "Import");
+  if (S.modal === "new-device") {
+    const kinds = ["Phone", "USB", "OPN-2001", "Bluetooth", "Wireless"].map((value) => ({ value, label: scannerAllowed(value) ? value : `${value} · higher plan` }));
+    return formModal("Register a device", "Locked types stay unavailable until the owner subscribes to the plan that includes them.", branchOptions() + field("name", "Device name", "text", "", "required") + select("kind", "Type", kinds) + field("serial", "Serial") + field("firmware", "Firmware"), "Save device");
+  }
+  if (S.modal === "billing" && S.checkout) return formModal(`Subscribe to ${S.checkout.plan.name}`, `${S.checkout.plan.label} per month. ${S.checkout.note || "Card checkout opens on Stripe."}`, `<p>${esc(S.checkout.plan.summary)}</p>`, "Confirm subscription");
+  if (S.modal === "import-csv") return formModal("Import scan CSV", "Rows are stored first. Apply them to an open count from the import list.", branchOptions() + select("deviceId", "Device", [{ value: "", label: "No device" }, ...S.data.devices.map((device) => ({ value: device.id, label: scannerAllowed(device.kind) ? device.name : `${device.name} · needs a higher plan` }))]) + `<div class="field"><label for="f_file">CSV file</label><input id="f_file" name="file" type="file" accept=".csv,text/csv" required></div>`, "Import");
   if (S.modal === "company") return formModal("Company settings", "Schedules use this timezone.", field("name", "Company name", "text", S.data.company?.name || S.user.companyName, "required") + field("timezone", "Timezone", "text", S.user.timezone, "required"), "Save");
-  if (S.modal === "account") return `<div class="modalshade"><div class="modal"><h2>Your account</h2><p class="sub">${esc(S.user.email)} · ${esc(S.user.role)} · ${esc(branchName(S.user.branchId))}</p><form id="actionform"><div class="formgrid">${field("current", "Current password", "password")}${field("next", "New password", "password", "", 'minlength="10"')}</div><div class="modalactions"><button type="button" class="btn light" data-act="close">Close</button><button type="button" class="btn light" data-act="privacy">Privacy</button><button type="button" class="btn light" data-act="mfa">Authenticator</button><button type="button" class="btn light" data-act="theme">Theme</button><button type="button" class="btn light" data-act="language">Language</button><button type="button" class="btn light" data-act="sign-out">Sign out</button><button class="btn green" type="submit">Change password</button></div></form></div></div>`;
+  if (S.modal === "account") return `<div class="modalshade"><div class="modal"><h2>Your account</h2><p class="sub">${esc(S.user.email)} · ${esc(S.user.role)} · ${esc(branchName(S.user.branchId))}</p><form id="actionform"><div class="formgrid">${field("current", "Current password", "password")}${field("next", "New password", "password", "", 'minlength="10"')}</div><div class="modalactions"><button type="button" class="btn light" data-act="close">Close</button><button type="button" class="btn light" data-act="privacy">Privacy</button><button type="button" class="btn light" data-act="mfa">Authenticator</button><button type="button" class="btn light" data-act="theme">Theme</button><button type="button" class="btn light" data-act="language">Language</button><button type="button" class="btn light" data-act="revoke-sessions">Sign out other sessions</button><button type="button" class="btn light" data-act="sign-out">Sign out</button><button class="btn green" type="submit">Change password</button></div></form></div></div>`;
   if (S.modal?.startsWith("asset:")) {
     const asset = S.data.assets.find((item) => item.id === S.modal.slice(6));
     if (!asset) return "";
@@ -324,7 +338,7 @@ async function refresh() {
   const data = await TechneAPI.send("GET", "/api/sync/pull");
   const pending = await TechneIDB.outbox();
   const blocked = new Set(pending.map((item) => item.bucket));
-  for (const key of ["branches", "employees", "assets", "products", "stocktakes", "schedules", "devices", "imports", "events", "audits", "notifications", "contractors"]) {
+  for (const key of ["branches", "employees", "assets", "products", "stocktakes", "schedules", "devices", "imports", "events", "audits", "notifications", "contractors", "reservations"]) {
     if (!blocked.has(key)) S.data[key] = data[key] || [];
   }
   S.data.company = data.company;
@@ -537,6 +551,10 @@ async function onSubmit(event) {
       S.modal = null;
       return run("POST", "/api/imports", body, "imports");
     }
+    if (modal === "billing") {
+      S.modal = null;
+      return run("POST", "/api/billing/demo", { checkoutId: S.checkout?.checkoutId }, "devices");
+    }
     if (modal?.startsWith("apply:")) {
       const id = modal.slice(6);
       S.modal = null;
@@ -614,6 +632,18 @@ async function action(name) {
     }
     return;
   }
+  if (name.startsWith("upgrade:")) {
+    if (S.user.role !== "owner") { S.banner = "Only an owner can change the scanner subscription."; return render(); }
+    try {
+      const result = await TechneAPI.send("POST", "/api/billing/checkout", { plan: name.slice(8), origin: location.origin });
+      if (result.url) { location.href = result.url; return; }
+      S.checkout = result;
+      S.modal = "billing";
+    } catch (error) {
+      S.banner = error.message;
+    }
+    return render();
+  }
   if (name.startsWith("retry-conflict:")) {
     await TechneIDB.mark(name.slice(15), { status: "pending", idempotencyKey: crypto.randomUUID(), error: "" });
     noteQueue(await TechneIDB.outbox());
@@ -623,6 +653,11 @@ async function action(name) {
     await TechneIDB.drop(name.slice(14));
     noteQueue(await TechneIDB.outbox());
     return render();
+  }
+  if (name === "revoke-sessions") {
+    if (!confirm("Sign out every other session for this login?")) return;
+    S.modal = null;
+    return run("POST", "/api/sessions/others/revoke", {}, "sessions");
   }
   if (name === "sign-out") {
     try { await TechneAPI.send("POST", "/api/logout", {}); } catch { /* local sign-out still proceeds */ }

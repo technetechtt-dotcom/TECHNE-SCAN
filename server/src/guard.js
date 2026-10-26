@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const BACKUP_TABLES = [
   "companies",
+  "billing_checkouts",
   "branches",
   "employees",
   "counters",
@@ -133,6 +134,44 @@ function backupDir() {
   return dir;
 }
 
+function backupKey() {
+  const raw = process.env.BACKUP_KEY || "";
+  if (raw.length < 16) return null;
+  return scryptSync(raw, "techne-backup-v1", 32);
+}
+
+export function sealBackup(dump) {
+  const json = JSON.stringify(dump);
+  const key = backupKey();
+  if (!key) {
+    if (process.env.NODE_ENV === "production") throw bad(503, "Set BACKUP_KEY before writing a backup.");
+    return { body: json, encrypted: false };
+  }
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const data = Buffer.concat([cipher.update(json, "utf8"), cipher.final()]);
+  const body = JSON.stringify({
+    v: 1,
+    alg: "aes-256-gcm",
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    data: data.toString("base64"),
+  });
+  return { body, encrypted: true };
+}
+
+export function openBackup(text) {
+  const parsed = JSON.parse(text);
+  if (parsed?.tables) return parsed;
+  if (parsed?.alg !== "aes-256-gcm") throw bad(400, "That backup cannot be read.");
+  const key = backupKey();
+  if (!key) throw bad(503, "Set BACKUP_KEY to read this backup.");
+  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(parsed.iv, "base64"));
+  decipher.setAuthTag(Buffer.from(parsed.tag, "base64"));
+  const json = Buffer.concat([decipher.update(Buffer.from(parsed.data, "base64")), decipher.final()]).toString("utf8");
+  return JSON.parse(json);
+}
+
 export async function exportSnapshot() {
   const tables = {};
   for (const table of BACKUP_TABLES) tables[table] = await query(`SELECT * FROM ${table}`);
@@ -141,11 +180,17 @@ export async function exportSnapshot() {
 
 export async function writeBackup() {
   const dump = await exportSnapshot();
-  const file = path.join(backupDir(), `backup-${Date.now()}.json`);
-  fs.writeFileSync(file, JSON.stringify(dump));
-  const names = fs.readdirSync(backupDir()).filter((name) => name.startsWith("backup-") && name.endsWith(".json")).sort();
+  const sealed = sealBackup(dump);
+  const file = path.join(backupDir(), `backup-${Date.now()}${sealed.encrypted ? ".json.enc" : ".json"}`);
+  fs.writeFileSync(file, sealed.body);
+  const names = fs.readdirSync(backupDir()).filter((name) => name.startsWith("backup-")).sort();
   while (names.length > 14) fs.unlinkSync(path.join(backupDir(), names.shift()));
-  return { file: path.basename(file), companies: dump.tables.companies.length };
+  const webhook = process.env.BACKUP_WEBHOOK_URL;
+  if (webhook && sealed.encrypted) {
+    const response = await fetch(webhook, { method: "POST", headers: { "content-type": "application/json" }, body: sealed.body });
+    if (!response.ok) throw bad(502, "The off-site backup store rejected the encrypted copy.");
+  }
+  return { file: path.basename(file), companies: dump.tables.companies.length, encrypted: sealed.encrypted };
 }
 
 export async function restoreSnapshot(dump) {
@@ -178,6 +223,14 @@ export async function housekeeping() {
   await query(`DELETE FROM idempotency_keys WHERE created_at < now() - interval '30 days'`);
   await query(`DELETE FROM mfa_challenges WHERE expires_at < now()`);
   await query(`DELETE FROM password_resets WHERE expires_at < now() - interval '1 day'`);
+  await query(`UPDATE companies SET plan = 'starter', plan_status = 'cancelled' WHERE plan <> 'starter' AND plan_until IS NOT NULL AND plan_until < now()`);
+  await query(`UPDATE asset_reservations SET status = 'expired' WHERE status = 'booked' AND ends_on < CURRENT_DATE`);
+  await query(
+    `UPDATE assets SET status = 'available', holder = '', version = version + 1, updated_at = now()
+     WHERE status = 'reserved' AND NOT EXISTS (
+       SELECT 1 FROM asset_reservations r WHERE r.asset_id = assets.id AND r.status = 'booked' AND r.ends_on >= CURRENT_DATE
+     )`,
+  );
   const dir = backupDir();
   const names = fs.readdirSync(dir).filter((name) => name.startsWith("backup-"));
   const newest = names.map((name) => fs.statSync(path.join(dir, name)).mtimeMs).sort((a, b) => b - a)[0] || 0;

@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { query, tx } from "./db.js";
+import { assertScannerAllowed, confirmDemoCheckout, startCheckout } from "./billing.js";
 import { bad } from "./errors.js";
 import { writeBackup } from "./guard.js";
 import { readLabel, signLabel } from "./labels.js";
 import {
   ROLES,
   assertCap,
+  assertFreshMfa,
   assertPassword,
   asUuid,
   cleanEmail,
@@ -592,6 +594,8 @@ export async function resetPassword(input) {
 }
 
 export async function beginMfa(user) {
+  const existing = await query(`SELECT mfa_enabled FROM employees WHERE id = $1`, [user.id]);
+  if (existing[0]?.mfa_enabled) throw bad(409, "Authenticator is already on. Turn it off with your password and a current code first.");
   const secret = newMfaSecret();
   await query(`UPDATE employees SET mfa_secret = $1, mfa_enabled = false WHERE id = $2`, [secret, user.id]);
   const label = encodeURIComponent(user.email || user.name);
@@ -607,7 +611,23 @@ export async function confirmMfa(user, input) {
     await query(`INSERT INTO mfa_backup_codes (id, employee_id, code_hash) VALUES ($1,$2,$3)`, [randomUUID(), user.id, hashToken(code)]);
   }
   await query(`UPDATE employees SET mfa_enabled = true WHERE id = $1`, [user.id]);
+  if (user.sessionId) {
+    await query(`UPDATE sessions SET revoked_at = now() WHERE employee_id = $1 AND id <> $2 AND revoked_at IS NULL`, [user.id, user.sessionId]);
+  }
   return { backupCodes: backups };
+}
+
+export async function disableMfa(user, input) {
+  const rows = await query(`SELECT password_hash, mfa_secret, mfa_enabled FROM employees WHERE id = $1`, [user.id]);
+  if (!rows[0]?.mfa_enabled) throw bad(400, "Authenticator is not on.");
+  if (!(await verifyPassword(String(input.password || ""), rows[0].password_hash))) throw bad(401, "Password is wrong.");
+  if (!verifyTotp(rows[0].mfa_secret, input.code)) throw bad(401, "That code is not valid.");
+  await query(`UPDATE employees SET mfa_enabled = false, mfa_secret = NULL, updated_at = now() WHERE id = $1`, [user.id]);
+  await query(`DELETE FROM mfa_backup_codes WHERE employee_id = $1`, [user.id]);
+  if (user.sessionId) {
+    await query(`UPDATE sessions SET revoked_at = now() WHERE employee_id = $1 AND id <> $2 AND revoked_at IS NULL`, [user.id, user.sessionId]);
+  }
+  return { ok: true };
 }
 
 function randomBytesHex() {
@@ -639,7 +659,7 @@ export async function completeMfa(input) {
     }
   }
   if (!ok) throw bad(401, "That code is not valid.");
-  await query(`DELETE FROM mfa_challenges WHERE token_hash = $1`, [hashToken(challenge)]);
+  await query(`DELETE FROM mfa_challenges WHERE employee_id = $1`, [rows[0].employee_id]);
   return userById(rows[0].employee_id);
 }
 
@@ -737,8 +757,9 @@ export async function recordScannerBatch(user, input) {
   const serial = clip(input.serial || "unknown", 80, "Serial");
   const firmware = optionalText(input.firmware, 40);
   let deviceId = null;
-  const found = await query(`SELECT id FROM devices WHERE company_id = $1 AND lower(serial) = lower($2)`, [user.companyId, serial]);
+  const found = await query(`SELECT id, kind FROM devices WHERE company_id = $1 AND lower(serial) = lower($2)`, [user.companyId, serial]);
   if (found[0]) {
+    await assertScannerAllowed(user.companyId, found[0].kind);
     deviceId = found[0].id;
     await query(`UPDATE devices SET last_seen_at = now(), firmware = CASE WHEN $2 = '' THEN firmware ELSE $2 END, updated_at = now() WHERE id = $1`, [deviceId, firmware]);
     await query(`INSERT INTO device_events (id, company_id, device_id, kind, detail) VALUES ($1,$2,$3,'sync',$4)`, [randomUUID(), user.companyId, deviceId, firmware || "batch accepted"]);
@@ -756,8 +777,37 @@ export async function updateSettings(user, input) {
   return settings;
 }
 
+export async function listPhotos(user, assetId) {
+  assertCap(user, "assets");
+  const id = asUuid(assetId, "Asset");
+  const params = [id, user.companyId];
+  let sql = `SELECT p.id, p.kind, p.note, p.created_at FROM asset_photos p JOIN assets a ON a.id = p.asset_id WHERE p.asset_id = $1 AND p.company_id = $2`;
+  if (!companyWide(user)) {
+    params.push(user.branchId);
+    sql += ` AND a.branch_id = $${params.length}`;
+  }
+  sql += ` ORDER BY p.created_at`;
+  const rows = await query(sql, params);
+  return rows.map((row) => ({ id: row.id, kind: row.kind, note: row.note, createdAt: row.created_at }));
+}
+
+export async function readPhoto(user, photoId) {
+  assertCap(user, "assets");
+  const id = asUuid(photoId, "Photo");
+  const params = [id, user.companyId];
+  let sql = `SELECT p.data_url, p.kind FROM asset_photos p JOIN assets a ON a.id = p.asset_id WHERE p.id = $1 AND p.company_id = $2`;
+  if (!companyWide(user)) {
+    params.push(user.branchId);
+    sql += ` AND a.branch_id = $${params.length}`;
+  }
+  const rows = await query(sql, params);
+  if (!rows[0]) throw bad(404, "Photo not found.");
+  return { kind: rows[0].kind, dataUrl: rows[0].data_url };
+}
+
 export async function backupNow(user) {
   assertCap(user, "company");
+  assertFreshMfa(user);
   if (user.role !== "owner") throw bad(403, "Only an owner can take a backup.");
   return writeBackup();
 }
@@ -789,6 +839,9 @@ export function opsRoutes() {
     ["POST", /^\/api\/privacy\/erase$/, (user, body) => eraseAccount(user, body)],
     ["POST", /^\/api\/mfa\/setup$/, (user) => beginMfa(user)],
     ["POST", /^\/api\/mfa\/confirm$/, (user, body) => confirmMfa(user, body)],
+    ["POST", /^\/api\/mfa\/disable$/, (user, body) => disableMfa(user, body)],
+    ["GET", /^\/api\/assets\/([^/]+)\/photos$/, (user, _body, id) => listPhotos(user, id)],
+    ["GET", /^\/api\/photos\/([^/]+)$/, (user, _body, id) => readPhoto(user, id)],
     ["POST", /^\/api\/invitations$/, (user, body) => createInvitation(user, body)],
     ["POST", /^\/api\/api-keys$/, (user, body) => createApiKey(user, body)],
     ["POST", /^\/api\/webhooks$/, (user, body) => createWebhook(user, body)],
@@ -796,5 +849,7 @@ export function opsRoutes() {
     ["POST", /^\/api\/scanners\/batch$/, (user, body) => recordScannerBatch(user, body)],
     ["PATCH", /^\/api\/company\/settings$/, (user, body) => updateSettings(user, body)],
     ["POST", /^\/api\/admin\/backup$/, (user) => backupNow(user)],
+    ["POST", /^\/api\/billing\/checkout$/, (user, body) => startCheckout(user, body)],
+    ["POST", /^\/api\/billing\/demo$/, (user, body) => confirmDemoCheckout(user, body)],
   ];
 }
