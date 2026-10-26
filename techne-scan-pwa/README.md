@@ -11,7 +11,7 @@ npm install
 npm start
 ```
 
-Open `http://localhost:8080`. On this machine the sign-in screen shows the local demo owner and a clerk login. Create a company from that screen when you want a separate tenant. Set `DATABASE_URL` to use an external PostgreSQL database instead of the built-in PostgreSQL data directory. Set `SEED_DEMO=0` to skip the sample company.
+Open `http://localhost:8080`. Outside production, a localhost sign-in screen can show the sample company. `NODE_ENV=production` never seeds that company and never returns its password. Set `SEED_DEMO=0` to skip it in development too. Set `DATABASE_URL` to use an external PostgreSQL database. Set `EMAIL_WEBHOOK_URL` to deliver password-reset tokens, and `ALERT_WEBHOOK_URL` for server error alerts. Set `OPENAI_API_KEY` only if Intelligence should call a model; the call is limited to the signed-in company's summary and cannot post stock on its own.
 
 The browser keeps an IndexedDB copy and retries failed writes. Counts, labels, and approvals need the server for the ledger. Scheduled counts run every 30 seconds while this process is up.
 
@@ -23,16 +23,20 @@ The browser keeps an IndexedDB copy and retries failed writes. Counts, labels, a
 - Daily, weekly, and monthly schedules that open counts in the company timezone
 - Device register, quoted CSV import, and apply-to-open-count
 - In-app notifications for overdue assets, assignments, and submitted counts
-- IndexedDB outbox: writes made offline sync when the connection returns
+- IndexedDB keeps each queued write as its own record. A rejected change stays on the Conflicts screen until it is retried or discarded.
+- Sectional counts can combine department, aisle, shelf, and category. Checkout accepts an employee code such as TT-EMP-001.
 - Techne Intelligence: recommendations, discrepancy explanations, days of cover from recorded issues, and plain-language questions over that data
 
 ## Still outstanding
 
-- No direct USB link to an OPN-2001. Imports are CSV from the Companion app, tied to a registered device.
-- Camera QR scanning needs BarcodeDetector, which is not in every browser.
-- Intelligence does not call an external model. It explains the ledger and count history.
-- Sessions are httpOnly cookies with scrypt passwords. This is not yet OIDC, MFA, or a signed label token.
-- Do not point this demo database at real customer data until backup, retention, and a security review are in place.
+These items are not done, and the app does not pretend they are:
+
+- The Opticon OPN-2001 USB SDK is not bundled. `connect/techne-connect.mjs` posts a CSV batch and does not clear scanner memory. No physical scanner was tested.
+- There is no payment processor, Xero, Sage, SMS, or WhatsApp connection. Webhooks can be registered over HTTPS only.
+- POPIA controls here are technical: export, login removal, retention of sessions and notices, and an in-app notice. That is not a legal compliance certificate.
+- No penetration test, pilot customer, or mobile-lab certification has been run.
+- Camera scanning still depends on BarcodeDetector.
+- Playwright browser tests are not in this repo. `npm test` covers the API, queue, restore, and a production HTTP boot.
 
 ## Suggested production architecture
 
@@ -67,4 +71,4 @@ The browser keeps an IndexedDB copy and retries failed writes. Counts, labels, a
 
 ## Notes
 
-Example data is automatically seeded on first launch. This is a new starter, not linked to an existing GitHub repository and no remote changes have been made.
+Example data is seeded on first launch outside production. Production never creates that sample company.

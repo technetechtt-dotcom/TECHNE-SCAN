@@ -3,7 +3,8 @@ import { query, tx } from "./db.js";
 import { bad } from "./errors.js";
 import { explainLine } from "./reconcile.js";
 import { parseScanCsv } from "./csv.js";
-import { addDays, nextRunAt, todayInTz, weekdayInTz } from "./time.js";
+import { signLabel } from "./labels.js";
+import { addDays, nextRunAt, todayInTz, weekdayInTz, zonedTimeToUtc } from "./time.js";
 import {
   ROLES,
   assertCap,
@@ -53,6 +54,7 @@ function mapUser(row) {
     email: row.email,
     role: row.role,
     caps: capsFor(row.role),
+    mfaEnabled: Boolean(row.mfa_enabled),
   };
 }
 
@@ -72,6 +74,7 @@ function mapEmployee(row, viewer) {
     id: row.id,
     branchId: row.branch_id,
     name: row.name,
+    publicId: row.public_id || "",
     role: row.role,
     active: row.active,
   };
@@ -94,6 +97,11 @@ function mapAsset(row) {
     due: dateOnly(row.due),
     condition: row.condition,
     version: row.version,
+    qrVersion: row.qr_version || 1,
+    supplier: row.supplier || "",
+    purchaseCost: row.purchase_cost == null ? null : Number(row.purchase_cost),
+    warrantyUntil: dateOnly(row.warranty_until),
+    insuranceUntil: dateOnly(row.insurance_until),
     updatedAt: iso(row.updated_at),
   };
 }
@@ -108,6 +116,13 @@ function mapProduct(row) {
     aisle: row.aisle,
     category: row.category,
     qty: num(row.qty),
+    reorderLevel: num(row.reorder_level),
+    unit: row.unit || "each",
+    shelf: row.shelf || "",
+    rack: row.rack || "",
+    bin: row.bin || "",
+    abcClass: row.abc_class || "",
+    expiresOn: dateOnly(row.expires_on),
     version: row.version,
     updatedAt: iso(row.updated_at),
   };
@@ -126,6 +141,9 @@ function mapSchedule(row) {
     dayOfMonth: row.day_of_month,
     assignedEmployeeId: row.assigned_employee_id,
     active: row.active,
+    intervalDays: row.interval_days,
+    paused: Boolean(row.paused),
+    abcClass: row.abc_class || "",
     nextRunAt: iso(row.next_run_at),
     lastRunAt: iso(row.last_run_at),
   };
@@ -138,6 +156,8 @@ function mapDevice(row) {
     name: row.name,
     kind: row.kind,
     serial: row.serial,
+    firmware: row.firmware || "",
+    holder: row.holder || "",
     status: row.status,
     lastSeenAt: iso(row.last_seen_at),
   };
@@ -193,12 +213,14 @@ function friendly(error) {
     if (message.includes("email")) return bad(409, "That email is already in use.");
     if (message.includes("sku") || message.includes("products")) return bad(409, "That SKU already exists.");
     if (message.includes("code")) return bad(409, "That branch code already exists.");
+    if (message.includes("batch")) return bad(409, "That scanner batch was already imported.");
+    if (message.includes("stock_ledger")) return bad(409, "That count adjustment was already posted.");
     return bad(409, "That record already exists.");
   }
   return error;
 }
 
-async function audit(q, user, action, entity, entityId, detail = {}) {
+export async function audit(q, user, action, entity, entityId, detail = {}) {
   await q(
     `INSERT INTO audit_log (id, company_id, actor_id, action, entity, entity_id, detail) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`,
     [randomUUID(), user.companyId, user.id, action, entity, entityId, JSON.stringify(detail)],
@@ -212,7 +234,7 @@ async function notify(q, { companyId, employeeId, kind, title, body, href = "" }
   );
 }
 
-async function userById(id) {
+export async function userById(id) {
   const rows = await query(
     `SELECT e.*, c.name AS company_name, c.timezone, b.name AS branch_name
      FROM employees e
@@ -224,12 +246,12 @@ async function userById(id) {
   return rows[0] ? mapUser(rows[0]) : null;
 }
 
-export async function createSession(employeeId) {
+export async function createSession(employeeId, userAgent = "") {
   const token = newToken();
   const expires = new Date(Date.now() + SESSION_MS);
   await query(
-    `INSERT INTO sessions (id, employee_id, token_hash, expires_at) VALUES ($1,$2,$3,$4)`,
-    [randomUUID(), employeeId, hashToken(token), expires.toISOString()],
+    `INSERT INTO sessions (id, employee_id, token_hash, expires_at, user_agent) VALUES ($1,$2,$3,$4,$5)`,
+    [randomUUID(), employeeId, hashToken(token), expires.toISOString(), String(userAgent || "").slice(0, 200)],
   );
   return { token, maxAge: Math.floor(SESSION_MS / 1000) };
 }
@@ -242,18 +264,25 @@ export async function userForToken(token) {
      JOIN employees e ON e.id = s.employee_id
      JOIN companies c ON c.id = e.company_id
      JOIN branches b ON b.id = e.branch_id
-     WHERE s.token_hash = $1 AND s.expires_at > now() AND e.active`,
+     WHERE s.token_hash = $1 AND s.expires_at > now() AND s.revoked_at IS NULL AND e.active
+       AND s.last_seen_at > now() - interval '12 hours'`,
     [hashToken(token)],
   );
-  return rows[0] ? mapUser(rows[0]) : null;
+  if (!rows[0]) return null;
+  await query(
+    `UPDATE sessions SET last_seen_at = now() WHERE token_hash = $1 AND last_seen_at < now() - interval '1 minute'`,
+    [hashToken(token)],
+  );
+  return mapUser(rows[0]);
 }
 
 export async function logout(token) {
   if (!token) return;
-  await query(`DELETE FROM sessions WHERE token_hash = $1`, [hashToken(token)]);
+  await query(`UPDATE sessions SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL`, [hashToken(token)]);
 }
 
 export async function setupStatus(localHost) {
+  if (process.env.NODE_ENV === "production") return { demoLogin: null };
   const rows = await query(`SELECT email FROM employees WHERE lower(email) = $1 LIMIT 1`, [DEMO_EMAIL]);
   return {
     demoLogin: localHost && rows[0] ? { email: DEMO_EMAIL, password: DEMO_PASSWORD } : null,
@@ -311,9 +340,22 @@ export async function login(email, password) {
     [normalized],
   );
   const row = rows[0];
+  if (row?.locked_until && new Date(row.locked_until).getTime() > Date.now()) {
+    throw bad(429, "This account is temporarily locked. Try again in a few minutes.");
+  }
   const hash = row?.password_hash || "scrypt$00$00";
   const match = await verifyPassword(password, hash);
-  if (!row || !match || !row.active) throw bad(401, "Email or password is incorrect.");
+  if (!row || !match || !row.active) {
+    if (row?.active) {
+      const fails = Number(row.failed_logins || 0) + 1;
+      await query(
+        `UPDATE employees SET failed_logins = $1, locked_until = CASE WHEN $1 >= 8 THEN now() + interval '15 minutes' ELSE NULL END WHERE id = $2`,
+        [fails, row.id],
+      );
+    }
+    throw bad(401, "Email or password is incorrect.");
+  }
+  await query(`UPDATE employees SET failed_logins = 0, locked_until = NULL WHERE id = $1`, [row.id]);
   await query(
     `INSERT INTO audit_log (id, company_id, actor_id, action, entity, entity_id, detail) VALUES ($1,$2,$3,'auth.login','employee',$3,'{}'::jsonb)`,
     [randomUUID(), row.company_id, row.id],
@@ -328,6 +370,7 @@ export async function changePassword(user, input) {
   if (!match) throw bad(400, "Current password is incorrect.");
   const passwordHash = await hashPassword(input.next);
   await query(`UPDATE employees SET password_hash = $1, updated_at = now() WHERE id = $2`, [passwordHash, user.id]);
+  await query(`UPDATE sessions SET revoked_at = now() WHERE employee_id = $1`, [user.id]);
   return { ok: true };
 }
 
@@ -448,6 +491,9 @@ export async function updateEmployee(user, id, input) {
     const passwordHash = await hashPassword(input.password);
     await query(`UPDATE employees SET password_hash=$1 WHERE id=$2`, [passwordHash, employeeId]);
   }
+  if (input.password || role !== existing[0].role || active !== existing[0].active) {
+    await query(`UPDATE sessions SET revoked_at = now() WHERE employee_id = $1`, [employeeId]);
+  }
   const rows = await query(`SELECT * FROM employees WHERE id = $1`, [employeeId]);
   return mapEmployee(rows[0], user);
 }
@@ -462,12 +508,22 @@ async function nextAssetCode(q, companyId) {
   return `TT-AST-${String(rows[0].value).padStart(3, "0")}`;
 }
 
+async function qrSecret(companyId) {
+  const rows = await query(`SELECT qr_secret FROM companies WHERE id = $1`, [companyId]);
+  if (rows[0]?.qr_secret) return rows[0].qr_secret;
+  const secret = newToken();
+  await query(`UPDATE companies SET qr_secret = $1 WHERE id = $2 AND qr_secret IS NULL`, [secret, companyId]);
+  const again = await query(`SELECT qr_secret FROM companies WHERE id = $1`, [companyId]);
+  return again[0]?.qr_secret || secret;
+}
+
 export async function listAssets(user) {
   const params = [user.companyId];
   let sql = `SELECT * FROM assets WHERE company_id = $1`;
   sql += branchFilter(user, params);
   sql += ` ORDER BY public_id`;
-  return (await query(sql, params)).map(mapAsset);
+  const secret = await qrSecret(user.companyId);
+  return (await query(sql, params)).map((row) => ({ ...mapAsset(row), qrPayload: signLabel(secret, row.public_id, row.qr_version || 1) }));
 }
 
 export async function createAsset(user, input) {
@@ -497,6 +553,7 @@ async function assetForUpdate(q, user, id) {
   const params = [assetId, user.companyId];
   let sql = `SELECT * FROM assets WHERE id = $1 AND company_id = $2`;
   sql += branchFilter(user, params);
+  sql += ` FOR UPDATE`;
   const rows = await q(sql, params);
   if (!rows[0]) throw bad(404, "Asset not found.");
   return rows[0];
@@ -504,11 +561,32 @@ async function assetForUpdate(q, user, id) {
 
 export async function checkoutAsset(user, id, input) {
   assertCap(user, "assets");
-  const person = clip(input.person, 80, "Employee");
+  let person = String(input.person || "").trim();
+  if (input.employeeCode) {
+    const code = clip(input.employeeCode, 20, "Employee code");
+    const match = await query(
+      `SELECT name FROM employees WHERE company_id = $1 AND active AND lower(public_id) = lower($2)`,
+      [user.companyId, code],
+    );
+    if (!match[0]) throw bad(404, "That employee code was not found in this company.");
+    person = match[0].name;
+  }
+  person = clip(person, 80, "Employee");
   const due = String(input.due || "");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(due)) throw bad(400, "Enter an expected return date.");
   const notes = optionalText(input.notes, 400);
+  const signature = clip(input.acknowledgement, 80, "Acknowledgement");
+  if (signature.toLowerCase() !== person.toLowerCase()) throw bad(400, "Type the recipient's name to acknowledge the handover.");
+  if (input.version !== undefined && input.version !== null && input.version !== "" && Number(input.version) !== Number((await query(`SELECT version FROM assets WHERE id = $1`, [asUuid(id, "Asset")]))[0]?.version)) {
+    throw bad(409, "That asset changed. Refresh and try again.");
+  }
   return tx(async (q) => {
+    const known = await q(
+      `SELECT name FROM employees WHERE company_id = $1 AND active AND lower(name) = lower($2)
+       UNION ALL SELECT name FROM contractors WHERE company_id = $1 AND active AND lower(name) = lower($2)`,
+      [user.companyId, person],
+    );
+    if (!known[0]) throw bad(400, "Issue the asset to an employee or contractor in this company.");
     const current = await assetForUpdate(q, user, id);
     if (current.status !== "available") throw bad(409, "That asset is already checked out.");
     const rows = await q(
@@ -518,9 +596,9 @@ export async function checkoutAsset(user, id, input) {
     );
     if (!rows[0]) throw bad(409, "That asset changed. Refresh and try again.");
     await q(
-      `INSERT INTO custody_events (id, company_id, asset_id, kind, person, condition, notes, location, actor_id)
-       VALUES ($1,$2,$3,'out',$4,$5,$6,$7,$8)`,
-      [randomUUID(), user.companyId, current.id, person, current.condition, notes, current.location, user.id],
+      `INSERT INTO custody_events (id, company_id, asset_id, kind, person, condition, notes, location, actor_id, signature_name)
+       VALUES ($1,$2,$3,'out',$4,$5,$6,$7,$8,$9)`,
+      [randomUUID(), user.companyId, current.id, person, current.condition, notes, current.location, user.id, signature],
     );
     await audit(q, user, "asset.checkout", "asset", current.id, { person, due });
     return mapAsset(rows[0]);
@@ -560,16 +638,21 @@ export async function listProducts(user) {
   return (await query(sql, params)).map(mapProduct);
 }
 
-async function postLedger(q, { companyId, branchId, productId, delta, reason, refType = "", refId = null, note = "", actorId = null, at = null }) {
+export async function postLedger(q, { companyId, branchId, productId, delta, reason, refType = "", refId = null, note = "", actorId = null, at = null }) {
   const rows = await q(`SELECT qty FROM products WHERE id = $1 AND company_id = $2 FOR UPDATE`, [productId, companyId]);
   if (!rows[0]) throw bad(404, "Product not found.");
   const next = num(rows[0].qty) + num(delta);
+  if (next < 0) throw bad(409, "That movement would take stock below zero.");
   await q(`UPDATE products SET qty = $1, version = version + 1, updated_at = now() WHERE id = $2`, [next, productId]);
+  try {
   await q(
     `INSERT INTO stock_ledger (id, company_id, branch_id, product_id, qty_delta, balance_after, reason, ref_type, ref_id, note, actor_id, at)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, COALESCE($12::timestamptz, now()))`,
     [randomUUID(), companyId, branchId, productId, delta, next, reason, refType, refId, note, actorId, at],
   );
+  } catch (error) {
+    throw friendly(error);
+  }
   return next;
 }
 
@@ -633,21 +716,53 @@ function scopeSql() {
     OR ($3 = 'aisle' AND lower(aisle) = lower($4))
     OR ($3 = 'department' AND lower(department) = lower($4))
     OR ($3 = 'category' AND lower(category) = lower($4))
+    OR ($3 = 'shelf' AND lower(shelf) = lower($4))
+    OR ($3 = 'rack' AND lower(rack) = lower($4))
+    OR ($3 = 'bin' AND lower(bin) = lower($4))
+    OR ($3 = 'abc' AND lower(abc_class) = lower($4))
     OR ($3 = 'range' AND lower(sku) LIKE lower($4) ESCAPE '\\')
+    OR ($3 = 'list' AND lower(sku) = ANY(string_to_array(lower($4), ',')))
   )`;
+}
+
+function cleanFilters(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const text = (key) => String(source[key] || "").trim().slice(0, 60);
+  return { department: text("department"), aisle: text("aisle"), shelf: text("shelf"), category: text("category") };
 }
 
 function scopeArgs(scope, value) {
   const kind = String(scope || "");
-  if (!["full", "aisle", "department", "category", "range"].includes(kind)) throw bad(400, "Choose a count scope.");
+  if (!["full", "aisle", "department", "category", "range", "shelf", "rack", "bin", "abc", "list", "combined"].includes(kind)) throw bad(400, "Choose a count scope.");
   const raw = String(value || "").trim();
-  if (kind !== "full" && !raw) throw bad(400, "Enter the aisle, department, category, or SKU prefix.");
-  if (raw.length > 60) throw bad(400, "Scope value is too long.");
-  const pattern = kind === "range" ? `${raw.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%` : raw;
-  return { kind, raw, pattern };
+  if (kind === "combined") {
+    let parsed = {};
+    try { parsed = JSON.parse(raw); } catch { throw bad(400, "Combined filters are not valid."); }
+    const filters = cleanFilters(parsed);
+    if (!filters.department && !filters.aisle && !filters.shelf && !filters.category) throw bad(400, "Choose at least one department, aisle, shelf, or category.");
+    return { kind, raw: JSON.stringify(filters), pattern: "", filters };
+  }
+  if (kind !== "full" && !raw) throw bad(400, "Enter the aisle, department, category, shelf, or SKU list.");
+  if (raw.length > 500) throw bad(400, "Scope value is too long.");
+  let pattern = raw;
+  if (kind === "range") pattern = `${raw.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+  if (kind === "list") pattern = raw.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean).join(",");
+  return { kind, raw, pattern, filters: null };
 }
 
-async function productsInScope(q, companyId, branchId, scope, pattern) {
+async function productsInScope(q, companyId, branchId, scope, pattern, filters = null) {
+  if (scope === "combined") {
+    const chosen = filters || {};
+    return q(
+      `SELECT * FROM products WHERE company_id = $1 AND branch_id = $2
+       AND ($3 = '' OR lower(department) = lower($3))
+       AND ($4 = '' OR lower(aisle) = lower($4))
+       AND ($5 = '' OR lower(shelf) = lower($5))
+       AND ($6 = '' OR lower(category) = lower($6))
+       ORDER BY name`,
+      [companyId, branchId, chosen.department || "", chosen.aisle || "", chosen.shelf || "", chosen.category || ""],
+    );
+  }
   return q(
     `SELECT * FROM products WHERE company_id = $1 AND branch_id = $2 AND ${scopeSql()} ORDER BY name`,
     [companyId, branchId, scope, pattern],
@@ -663,6 +778,9 @@ function mapStocktake(row, lines = []) {
     scope: row.scope,
     scopeValue: row.scope_value,
     status: row.status,
+    zone: row.zone || "",
+    doubleCount: Boolean(row.double_count),
+    reviewNote: row.review_note || "",
     assignedEmployeeId: row.assigned_employee_id,
     snapshotAt: iso(row.snapshot_at),
     submittedAt: iso(row.submitted_at),
@@ -674,17 +792,20 @@ function mapStocktake(row, lines = []) {
       name: line.name || "",
       expected: num(line.expected),
       counted: line.counted === null || line.counted === undefined ? null : num(line.counted),
+      counted2: line.counted_2 === null || line.counted_2 === undefined ? null : num(line.counted_2),
+      exception: line.exception || "",
       movement: num(line.movement),
       variance: line.variance === null || line.variance === undefined ? null : num(line.variance),
     })),
   };
 }
 
-async function stocktakeBundle(q, user, id) {
+async function stocktakeBundle(q, user, id, lock = false) {
   const stocktakeId = asUuid(id, "Stocktake");
   const params = [stocktakeId, user.companyId];
   let sql = `SELECT * FROM stocktakes WHERE id = $1 AND company_id = $2`;
   sql += branchFilter(user, params);
+  if (lock) sql += ` FOR UPDATE`;
   const rows = await q(sql, params);
   if (!rows[0]) throw bad(404, "Stocktake not found.");
   const lines = await q(
@@ -710,14 +831,21 @@ export async function listStocktakes(user) {
   return rows.map((row) => mapStocktake(row, lines.filter((line) => line.stocktake_id === row.id)));
 }
 
-async function insertStocktake(q, { user, id, branchId, scheduleId, name, scope, scopeValue, pattern, assignedEmployeeId }) {
-  const products = await productsInScope(q, user.companyId, branchId, scope, pattern);
+async function insertStocktake(q, { user, id, branchId, scheduleId, name, scope, scopeValue, pattern, assignedEmployeeId, zone = "", doubleCount = false, filters = null }) {
+  const products = await productsInScope(q, user.companyId, branchId, scope, pattern, filters);
   if (!products.length) throw bad(400, "No products match that scope.");
+  const ids = products.map((product) => product.id);
+  const clash = await q(
+    `SELECT s.name FROM stocktake_lines l JOIN stocktakes s ON s.id = l.stocktake_id
+     WHERE s.company_id = $1 AND s.branch_id = $2 AND s.status IN ('active','paused') AND l.product_id = ANY($3::uuid[]) LIMIT 1`,
+    [user.companyId, branchId, ids],
+  );
+  if (clash[0]) throw bad(409, `Those products are already in an open count: ${clash[0].name}.`);
   const stocktakeId = id || randomUUID();
   const rows = await q(
-    `INSERT INTO stocktakes (id, company_id, branch_id, schedule_id, name, scope, scope_value, status, assigned_employee_id, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9) RETURNING *`,
-    [stocktakeId, user.companyId, branchId, scheduleId, name, scope, scopeValue, assignedEmployeeId, user.id],
+    `INSERT INTO stocktakes (id, company_id, branch_id, schedule_id, name, scope, scope_value, status, assigned_employee_id, created_by, zone, double_count)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9,$10,$11) RETURNING *`,
+    [stocktakeId, user.companyId, branchId, scheduleId, name, scope, scopeValue, assignedEmployeeId, user.id, String(zone || "").slice(0, 60), Boolean(doubleCount)],
   );
   for (const product of products) {
     await q(
@@ -762,6 +890,9 @@ export async function createStocktake(user, input) {
     scopeValue: scope.kind === "full" ? "" : scope.raw,
     pattern: scope.pattern,
     assignedEmployeeId: assigned,
+    zone: optionalText(input.zone, 60),
+    doubleCount: input.doubleCount === true,
+    filters: scope.filters,
   }));
 }
 
@@ -782,6 +913,15 @@ export async function setCounts(user, id, input) {
       const count = Number(entry.count);
       if (!Number.isInteger(count) || count < 0 || count > 1_000_000) throw bad(400, "Counts must be whole numbers of 0 or more.");
       await q(`UPDATE stocktake_lines SET counted = $1 WHERE stocktake_id = $2 AND product_id = $3`, [count, bundle.row.id, productId]);
+      if (entry.count2 !== undefined && entry.count2 !== null && entry.count2 !== "") {
+        const second = Number(entry.count2);
+        if (!Number.isInteger(second) || second < 0 || second > 1_000_000) throw bad(400, "The second count must be a whole number.");
+        await q(`UPDATE stocktake_lines SET counted_2 = $1 WHERE stocktake_id = $2 AND product_id = $3`, [second, bundle.row.id, productId]);
+      }
+      if (entry.exception) {
+        const exception = optionalText(entry.exception, 120);
+        await q(`UPDATE stocktake_lines SET exception = $1 WHERE stocktake_id = $2 AND product_id = $3`, [exception, bundle.row.id, productId]);
+      }
     }
     await q(`UPDATE stocktakes SET version = version + 1, updated_at = now() WHERE id = $1`, [bundle.row.id]);
     const fresh = await stocktakeBundle(q, user, bundle.row.id);
@@ -804,6 +944,9 @@ export async function submitStocktake(user, id) {
     const bundle = await stocktakeBundle(q, user, id);
     if (bundle.row.status !== "active") throw bad(409, "This count was already submitted.");
     if (bundle.lines.some((line) => line.counted === null)) throw bad(400, "Count every product before submitting.");
+    if (bundle.row.double_count && bundle.lines.some((line) => line.counted_2 === null || Number(line.counted_2) !== Number(line.counted))) {
+      throw bad(409, "The two counts do not match. Recount the lines that differ.");
+    }
     const rows = await q(
       `UPDATE stocktakes SET status='completed', submitted_at=now(), version=version+1, updated_at=now() WHERE id=$1 RETURNING *`,
       [bundle.row.id],
@@ -846,7 +989,7 @@ export async function reconciliation(user, id) {
 export async function approveStocktake(user, id) {
   assertCap(user, "approve");
   return tx(async (q) => {
-    const bundle = await stocktakeBundle(q, user, id);
+    const bundle = await stocktakeBundle(q, user, id, true);
     if (bundle.row.status !== "completed") throw bad(409, "Only a submitted count can be approved.");
     if (bundle.row.created_by === user.id && user.role !== "owner") {
       throw bad(403, "Someone else must approve a count you submitted.");
@@ -883,9 +1026,10 @@ export async function approveStocktake(user, id) {
     }
     const rows = await q(
       `UPDATE stocktakes SET status='approved', approved_by=$1, approved_at=now(), version=version+1, updated_at=now()
-       WHERE id=$2 RETURNING *`,
+       WHERE id=$2 AND status='completed' RETURNING *`,
       [user.id, bundle.row.id],
     );
+    if (!rows[0]) throw bad(409, "This count was already approved.");
     await audit(q, user, "stocktake.approve", "stocktake", bundle.row.id, { name: bundle.row.name });
     const lines = await q(`SELECT * FROM stocktake_lines WHERE stocktake_id = $1`, [bundle.row.id]);
     return mapStocktake(rows[0], lines);
@@ -917,16 +1061,22 @@ export async function assignStocktake(user, id, input) {
 
 function scheduleSpec(user, input) {
   const frequency = String(input.frequency || "").toLowerCase();
-  if (!["daily", "weekly", "monthly"].includes(frequency)) throw bad(400, "Choose daily, weekly, or monthly.");
+  if (!["daily", "weekly", "monthly", "interval"].includes(frequency)) throw bad(400, "Choose daily, weekly, monthly, or an interval.");
   const timeOfDay = String(input.timeOfDay || "");
   if (!/^\d{2}:\d{2}$/.test(timeOfDay)) throw bad(400, "Enter a scheduled time.");
   const weekday = frequency === "weekly" ? Number(input.weekday ?? weekdayInTz(user.timezone)) : null;
   const dayOfMonth = frequency === "monthly" ? Number(input.dayOfMonth || todayInTz(user.timezone).slice(8)) : null;
+  const intervalDays = frequency === "interval" ? Number(input.intervalDays) : null;
   if (frequency === "weekly" && (!Number.isInteger(weekday) || weekday < 0 || weekday > 6)) throw bad(400, "Choose a weekday.");
   if (frequency === "monthly" && (!Number.isInteger(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 28)) {
     throw bad(400, "Monthly counts use a day from 1 to 28.");
   }
-  return { frequency, timeOfDay, weekday, dayOfMonth };
+  if (frequency === "interval" && (!Number.isInteger(intervalDays) || intervalDays < 1 || intervalDays > 365)) {
+    throw bad(400, "Interval counts use 1 to 365 days.");
+  }
+  const abcClass = String(input.abcClass || "").toUpperCase();
+  if (abcClass && !["A", "B", "C"].includes(abcClass)) throw bad(400, "ABC class is A, B, or C.");
+  return { frequency, timeOfDay, weekday, dayOfMonth, intervalDays, abcClass };
 }
 
 export async function listSchedules(user) {
@@ -957,9 +1107,9 @@ export async function createSchedule(user, input) {
   }
   const id = maybeUuid(input.id) || randomUUID();
   const rows = await query(
-    `INSERT INTO schedules (id, company_id, branch_id, name, scope, scope_value, frequency, time_of_day, weekday, day_of_month, assigned_employee_id, next_run_at, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
-    [id, user.companyId, branchId, name, scope.kind, scope.kind === "full" ? "" : scope.raw, spec.frequency, spec.timeOfDay, spec.weekday, spec.dayOfMonth, assigned, next.toISOString(), user.id],
+    `INSERT INTO schedules (id, company_id, branch_id, name, scope, scope_value, frequency, time_of_day, weekday, day_of_month, assigned_employee_id, next_run_at, created_by, interval_days, abc_class)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+    [id, user.companyId, branchId, name, scope.kind, scope.kind === "full" ? "" : scope.raw, spec.frequency, spec.timeOfDay, spec.weekday, spec.dayOfMonth, assigned, next.toISOString(), user.id, spec.intervalDays, spec.abcClass],
   );
   return mapSchedule(rows[0]);
 }
@@ -978,7 +1128,7 @@ export async function deleteSchedule(user, id) {
 
 async function openScheduledCount(q, schedule, actor) {
   const scope = scopeArgs(schedule.scope, schedule.scope_value);
-  const products = await productsInScope(q, schedule.company_id, schedule.branch_id, scope.kind, scope.pattern);
+  const products = await productsInScope(q, schedule.company_id, schedule.branch_id, scope.kind, scope.pattern, scope.filters);
   const recipients = schedule.assigned_employee_id
     ? [{ id: schedule.assigned_employee_id }]
     : await supervisors(q, schedule.company_id, schedule.branch_id);
@@ -1009,6 +1159,7 @@ async function openScheduledCount(q, schedule, actor) {
     scope: scope.kind,
     scopeValue: scope.kind === "full" ? "" : scope.raw,
     pattern: scope.pattern,
+    filters: scope.filters,
     assignedEmployeeId: schedule.assigned_employee_id,
   });
   for (const person of recipients) {
@@ -1040,31 +1191,77 @@ export async function runSchedule(user, id) {
   });
 }
 
+function upcomingRun(schedule) {
+  if (schedule.frequency === "interval") {
+    const days = Number(schedule.interval_days) || 1;
+    const [hour, minute] = String(schedule.time_of_day).split(":").map(Number);
+    const [year, month, day] = addDays(todayInTz(schedule.timezone), days).split("-").map(Number);
+    return zonedTimeToUtc(year, month, day, hour, minute, schedule.timezone);
+  }
+  return nextRunAt({
+    frequency: schedule.frequency,
+    timeOfDay: schedule.time_of_day,
+    weekday: schedule.weekday,
+    dayOfMonth: schedule.day_of_month,
+    timeZone: schedule.timezone,
+  }, new Date());
+}
+
 export async function runDueSchedules() {
+  const lock = await query(
+    `UPDATE scheduler_lock SET locked_until = now() + interval '90 seconds' WHERE id = 1 AND locked_until < now() RETURNING id`,
+  );
+  if (!lock[0]) return;
+  try {
   const due = await query(
     `SELECT s.*, c.timezone FROM schedules s
      JOIN companies c ON c.id = s.company_id
-     WHERE s.active AND s.next_run_at <= now()`,
+     WHERE s.active AND NOT s.paused AND s.next_run_at <= now()`,
   );
   for (const schedule of due) {
-    const spec = {
-      frequency: schedule.frequency,
-      timeOfDay: schedule.time_of_day,
-      weekday: schedule.weekday,
-      dayOfMonth: schedule.day_of_month,
-      timeZone: schedule.timezone,
-    };
-    const upcoming = nextRunAt(spec, new Date());
+    const upcoming = upcomingRun(schedule);
+    const late = new Date(schedule.next_run_at).getTime() < Date.now() - 24 * 60 * 60 * 1000;
     await tx(async (q) => {
       const locked = await q(
         `UPDATE schedules SET next_run_at = $2, last_run_at = now(), updated_at = now(), version = version + 1
-         WHERE id = $1 AND active AND next_run_at <= now() RETURNING *`,
+         WHERE id = $1 AND active AND NOT paused AND next_run_at <= now() RETURNING *`,
         [schedule.id, upcoming.toISOString()],
       );
       if (!locked[0]) return;
-      const actor = { id: locked[0].created_by };
-      await openScheduledCount(q, locked[0], actor);
+      const today = todayInTz(schedule.timezone);
+      const blocked = await q(`SELECT reason FROM blackout_dates WHERE company_id = $1 AND day = $2::date`, [locked[0].company_id, today]);
+      const recipients = locked[0].assigned_employee_id ? [{ id: locked[0].assigned_employee_id }] : [];
+      if (blocked[0]) {
+        for (const person of recipients) {
+          await notify(q, { companyId: locked[0].company_id, employeeId: person.id, kind: "schedule", title: "Count skipped", body: `${locked[0].name} falls on a blackout date.`, href: "schedules" });
+        }
+        return;
+      }
+      if (locked[0].assigned_employee_id) {
+        const staff = await q(`SELECT active FROM employees WHERE id = $1`, [locked[0].assigned_employee_id]);
+        const load = await q(`SELECT count(*)::int AS n FROM stocktakes WHERE assigned_employee_id = $1 AND status IN ('active','paused')`, [locked[0].assigned_employee_id]);
+        if (!staff[0]?.active) locked[0].assigned_employee_id = null;
+        else if (Number(load[0].n) >= 3) {
+          await notify(q, { companyId: locked[0].company_id, employeeId: locked[0].assigned_employee_id, kind: "schedule", title: "Workload is high", body: `${locked[0].name} was still opened. You already have several open counts.`, href: "schedules" });
+        }
+      }
+      if (late) {
+        for (const person of recipients) {
+          await notify(q, { companyId: locked[0].company_id, employeeId: person.id, kind: "schedule", title: "Missed count recovered", body: `${locked[0].name} was overdue and has been opened.`, href: "schedules" });
+        }
+      }
+      try {
+        await openScheduledCount(q, locked[0], { id: locked[0].created_by });
+      } catch (error) {
+        if (error.status !== 409) throw error;
+        for (const person of recipients) {
+          await notify(q, { companyId: locked[0].company_id, employeeId: person.id, kind: "schedule", title: "Scheduled count skipped", body: error.message, href: "schedules" });
+        }
+      }
     });
+  }
+  } finally {
+    await query(`UPDATE scheduler_lock SET locked_until = '1970-01-01T00:00:00Z' WHERE id = 1`);
   }
 }
 
@@ -1117,12 +1314,13 @@ export async function createDevice(user, input) {
   const branchId = await ownedBranch(query, user, input.branchId || user.branchId);
   const name = clip(input.name, 80, "Device name");
   const kind = String(input.kind || "");
-  if (!["OPN-2001", "Phone", "Other"].includes(kind)) throw bad(400, "Choose a device type.");
+  if (!["OPN-2001", "Phone", "USB", "Bluetooth", "Other"].includes(kind)) throw bad(400, "Choose a device type.");
   const serial = optionalText(input.serial, 80);
   const id = maybeUuid(input.id) || randomUUID();
+  const firmware = optionalText(input.firmware, 40);
   const rows = await query(
-    `INSERT INTO devices (id, company_id, branch_id, name, kind, serial) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-    [id, user.companyId, branchId, name, kind, serial],
+    `INSERT INTO devices (id, company_id, branch_id, name, kind, serial, firmware) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+    [id, user.companyId, branchId, name, kind, serial, firmware],
   );
   return mapDevice(rows[0]);
 }
@@ -1131,7 +1329,7 @@ export async function updateDevice(user, id, input) {
   assertCap(user, "devices");
   const deviceId = asUuid(id, "Device");
   const name = clip(input.name, 80, "Device name");
-  const status = input.status === "retired" ? "retired" : "active";
+  const status = ["retired", "repair", "active"].includes(input.status) ? input.status : "active";
   const serial = optionalText(input.serial, 80);
   const params = [name, status, serial, deviceId, user.companyId];
   let sql = `UPDATE devices SET name=$1, status=$2, serial=$3, version=version+1, updated_at=now() WHERE id=$4 AND company_id=$5`;
@@ -1177,10 +1375,26 @@ export async function createImport(user, input) {
     await query(`UPDATE devices SET last_seen_at = now(), updated_at = now() WHERE id = $1`, [deviceId]);
   }
   const id = maybeUuid(input.id) || randomUUID();
-  const rows = await query(
-    `INSERT INTO imports (id, company_id, branch_id, device_id, name, records, created_by) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7) RETURNING *`,
-    [id, user.companyId, branchId, deviceId, name, JSON.stringify(records), user.id],
-  );
+  const batchKey = optionalText(input.batchKey, 80) || null;
+  if (input.firmware && deviceId) {
+    await query(`UPDATE devices SET firmware = $1, last_seen_at = now() WHERE id = $2`, [optionalText(input.firmware, 40), deviceId]);
+  }
+  if (!deviceId && input.serial) {
+    const found = await query(`SELECT id FROM devices WHERE company_id = $1 AND lower(serial) = lower($2)`, [user.companyId, optionalText(input.serial, 80)]);
+    if (found[0]) deviceId = found[0].id;
+  }
+  let rows;
+  try {
+    rows = await query(
+      `INSERT INTO imports (id, company_id, branch_id, device_id, name, records, created_by, batch_key) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8) RETURNING *`,
+      [id, user.companyId, branchId, deviceId, name, JSON.stringify(records), user.id, batchKey],
+    );
+  } catch (error) {
+    throw friendly(error);
+  }
+  if (deviceId) {
+    await query(`INSERT INTO device_events (id, company_id, device_id, kind, detail) VALUES ($1,$2,$3,'import',$4)`, [randomUUID(), user.companyId, deviceId, `${records.length} rows kept, including repeated barcodes`]);
+  }
   return mapImport(rows[0]);
 }
 
@@ -1216,6 +1430,12 @@ export async function applyImport(user, id, input) {
         [quantity, bundle.row.id, line.product_id],
       );
       applied += 1;
+    }
+    if (unmatched.length) {
+      await q(
+        `INSERT INTO stocktake_evidence (id, company_id, stocktake_id, note, created_by) VALUES ($1,$2,$3,$4,$5)`,
+        [randomUUID(), user.companyId, bundle.row.id, `Unknown or out-of-scope barcodes: ${unmatched.slice(0, 30).join(", ")}`, user.id],
+      );
     }
     await q(`UPDATE imports SET applied_stocktake_id = $1 WHERE id = $2`, [bundle.row.id, importId]);
     await q(`UPDATE stocktakes SET version = version + 1, updated_at = now() WHERE id = $1`, [bundle.row.id]);
@@ -1300,11 +1520,12 @@ export async function pull(user) {
     events,
     audits,
     notifications,
+    contractors: (await query(`SELECT id, name, company_name AS "companyName" FROM contractors WHERE company_id = $1 AND active ORDER BY name`, [user.companyId])),
   };
 }
 
 export async function seedDemo() {
-  if (process.env.SEED_DEMO === "0") return;
+  if (process.env.NODE_ENV === "production" || process.env.SEED_DEMO === "0") return;
   const existing = await query(`SELECT id FROM companies LIMIT 1`);
   if (existing[0]) return;
   const admin = await setupCompany({

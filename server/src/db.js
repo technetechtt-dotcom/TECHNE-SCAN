@@ -26,10 +26,51 @@ export async function initDb() {
     await pglite.waitReady;
   }
   const schema = fs.readFileSync(path.join(__dirname, "..", "schema.sql"), "utf8");
-  if (mode === "pglite") await pglite.exec(schema);
-  else {
-    const statements = schema.split(";").map((part) => part.trim()).filter(Boolean);
-    for (const statement of statements) await pool.query(statement);
+  await exec(schema);
+  await migrate();
+}
+
+function splitSql(sql) {
+  const parts = [];
+  let current = "";
+  let dollar = false;
+  for (const line of sql.split("\n")) {
+    const marks = line.match(/\$\$/g);
+    if (marks && marks.length % 2 === 1) dollar = !dollar;
+    current += `${line}\n`;
+    if (!dollar && line.trim().endsWith(";")) {
+      const statement = current.trim();
+      if (statement && !statement.startsWith("--")) parts.push(statement);
+      current = "";
+    }
+  }
+  const tail = current.trim();
+  if (tail) parts.push(tail);
+  return parts;
+}
+
+export async function exec(sql) {
+  if (mode === "pglite") {
+    await pglite.exec(sql);
+    return;
+  }
+  for (const statement of splitSql(sql)) await pool.query(statement);
+}
+
+async function migrate() {
+  await exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+    version text PRIMARY KEY,
+    applied_at timestamptz NOT NULL DEFAULT now()
+  )`);
+  const dir = path.join(__dirname, "..", "migrations");
+  if (!fs.existsSync(dir)) return;
+  const files = fs.readdirSync(dir).filter((name) => name.endsWith(".sql")).sort();
+  for (const file of files) {
+    const version = file.replace(/\.sql$/, "");
+    const applied = await query(`SELECT version FROM schema_migrations WHERE version = $1`, [version]);
+    if (applied[0]) continue;
+    await exec(fs.readFileSync(path.join(dir, file), "utf8"));
+    await query(`INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT (version) DO NOTHING`, [version]);
   }
 }
 

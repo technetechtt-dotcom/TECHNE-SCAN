@@ -1,11 +1,13 @@
 const TechneAPI = {
-  async send(method, path, body) {
+  async send(method, path, body, idempotencyKey) {
     let response;
+    const headers = { "Content-Type": "application/json", "X-Techne-Client": "1" };
+    if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
     try {
       response = await fetch(path, {
         method,
         credentials: "same-origin",
-        headers: { "Content-Type": "application/json", "X-Techne-Client": "1" },
+        headers,
         body: method === "GET" || method === "HEAD" ? undefined : JSON.stringify(body || {}),
       });
     } catch {

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { cancelStocktake, reopenStocktake } from "../src/counts.js";
 import { parseScanCsv } from "../src/csv.js";
 import { closeDb, initDb, query } from "../src/db.js";
 import { ask, summary } from "../src/intelligence.js";
@@ -28,6 +29,7 @@ import {
 
 process.env.PGLITE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "techne-"));
 process.env.SEED_DEMO = "1";
+process.env.NODE_ENV = "test";
 
 test("schedule math and reconciliation math", () => {
   const next = nextRunAt({ frequency: "daily", timeOfDay: "08:00", timeZone: "Africa/Johannesburg" }, new Date("2026-10-23T05:00:00Z"));
@@ -107,7 +109,7 @@ test("tenant isolation, ledger approval, and scheduled counts", async () => {
   await approveStocktake(admin, own.id);
 
   const asset = (await listAssets(admin)).find((item) => item.status === "available");
-  await checkoutAsset(admin, asset.id, { person: "Lerato", due: "2026-10-30", notes: "Site visit" });
+  await checkoutAsset(admin, asset.id, { person: "Techne Admin", due: "2026-10-30", notes: "Site visit", acknowledgement: "Techne Admin" });
   await checkinAsset(admin, asset.id, { person: "Stores", condition: "Good", location: "Cage A", notes: "" });
   const back = (await listAssets(admin)).find((item) => item.id === asset.id);
   assert.equal(back.location, "Cage A");
@@ -135,5 +137,30 @@ test("tenant isolation, ledger approval, and scheduled counts", async () => {
   const answer = await ask(admin, "Which assets are overdue?");
   assert.match(answer.answer, /Projector/);
   assert.equal(other.companyId === admin.companyId, false);
+
+  const combined = await createStocktake(admin, {
+    name: "IT accessories",
+    scope: "combined",
+    scopeValue: JSON.stringify({ department: "IT", aisle: "IT Store", shelf: "", category: "Accessories" }),
+    branchId: admin.branchId,
+  });
+  const skus = await query(
+    `SELECT p.sku FROM stocktake_lines l JOIN products p ON p.id = l.product_id WHERE l.stocktake_id = $1 ORDER BY p.sku`,
+    [combined.id],
+  );
+  assert.deepEqual(skus.map((row) => row.sku), ["IT-001", "IT-002"]);
+  await cancelStocktake(admin, combined.id);
+  assert.equal((await reopenStocktake(admin, combined.id)).status, "active");
+
+  const code = await query(`SELECT public_id FROM employees WHERE company_id = $1 AND lower(name) = 'techne admin'`, [admin.companyId]);
+  assert.match(code[0].public_id, /^TT-EMP-\d{3}$/);
+  const free = (await listAssets(admin)).find((item) => item.status === "available");
+  await assert.rejects(
+    () => checkoutAsset(admin, free.id, { employeeCode: code[0].public_id, due: "2026-11-02", acknowledgement: "Someone Else" }),
+    /acknowledge/,
+  );
+  await checkoutAsset(admin, free.id, { person: "Wrong Name", employeeCode: code[0].public_id, due: "2026-11-02", acknowledgement: "Techne Admin" });
+  const issued = (await listAssets(admin)).find((item) => item.id === free.id);
+  assert.equal(issued.holder, "Techne Admin");
   await closeDb();
 });

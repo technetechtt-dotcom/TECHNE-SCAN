@@ -74,6 +74,14 @@ export async function summary(user) {
         detail: `${product.sku} is in ${product.aisle}. Include it in the next sectional count.`,
       });
     }
+    if (Number(product.reorder_level) > 0 && Number(product.qty) <= Number(product.reorder_level)) {
+      recommendations.push({
+        id: `reorder:${product.id}`,
+        severity: "high",
+        title: `${product.name} is at its reorder level`,
+        detail: `${product.qty} on hand. Reorder level is ${product.reorder_level}.`,
+      });
+    }
   }
   const discrepancies = variances.map((row) => {
     const variance = row.variance === null || row.variance === undefined ? Number(row.counted) - Number(row.expected) : Number(row.variance);
@@ -201,8 +209,33 @@ export async function ask(user, question) {
       details: found,
     };
   }
+  if (process.env.OPENAI_API_KEY) {
+    const modelled = await externalAnswer(text, data);
+    if (modelled) return { answer: modelled, details: [], method: "External model limited to this company's summary. Suggested stock changes still need a person to approve them." };
+  }
   return {
     answer: "I can answer questions about overdue assets, who has equipment, low stock, days of cover, count discrepancies, and schedules.",
     details: [],
   };
+}
+
+async function externalAnswer(question, data) {
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "Answer only from the JSON for this organisation. Do not use or infer another company's data. Do not invent quantities. If a write is requested, say a person must approve it in Techne Scan." },
+          { role: "user", content: JSON.stringify({ question, recommendations: data.recommendations, forecast: data.forecast }).slice(0, 12000) },
+        ],
+      }),
+    });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    return payload.choices?.[0]?.message?.content || null;
+  } catch {
+    return null;
+  }
 }

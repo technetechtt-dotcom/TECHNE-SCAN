@@ -1,5 +1,23 @@
+import {
+  addBlackout,
+  addEvidence,
+  assignCounters,
+  cancelStocktake,
+  reopenStocktake,
+  coverageReport,
+  pauseSchedule,
+  pauseStocktake,
+  previewScope,
+  recountStocktake,
+  resumeStocktake,
+  scheduleCalendar,
+  setReview,
+} from "./counts.js";
 import { bad } from "./errors.js";
+import { runIdempotent } from "./guard.js";
+import { checkSchema } from "./schema.js";
 import { ask, summary } from "./intelligence.js";
+import { opsRoutes } from "./ops.js";
 import {
   applyImport,
   approveStocktake,
@@ -81,6 +99,20 @@ const routes = [
   ["GET", /^\/api\/activity$/, async (user) => ({ events: await listEvents(user), audits: await listAudits(user) })],
   ["GET", /^\/api\/intelligence\/summary$/, (user) => summary(user)],
   ["POST", /^\/api\/intelligence\/ask$/, (user, body) => ask(user, body.question)],
+  ["POST", /^\/api\/stocktakes\/preview$/, (user, body) => previewScope(user, body)],
+  ["POST", /^\/api\/stocktakes\/([^/]+)\/pause$/, (user, _body, id) => pauseStocktake(user, id)],
+  ["POST", /^\/api\/stocktakes\/([^/]+)\/resume$/, (user, _body, id) => resumeStocktake(user, id)],
+  ["POST", /^\/api\/stocktakes\/([^/]+)\/cancel$/, (user, _body, id) => cancelStocktake(user, id)],
+  ["POST", /^\/api\/stocktakes\/([^/]+)\/reopen$/, (user, _body, id) => reopenStocktake(user, id)],
+  ["POST", /^\/api\/stocktakes\/([^/]+)\/recount$/, (user, body, id) => recountStocktake(user, id, body)],
+  ["POST", /^\/api\/stocktakes\/([^/]+)\/evidence$/, (user, body, id) => addEvidence(user, id, body)],
+  ["POST", /^\/api\/stocktakes\/([^/]+)\/review$/, (user, body, id) => setReview(user, id, body)],
+  ["POST", /^\/api\/stocktakes\/([^/]+)\/counters$/, (user, body, id) => assignCounters(user, id, body)],
+  ["GET", /^\/api\/stocktakes\/coverage$/, (user) => coverageReport(user)],
+  ["POST", /^\/api\/schedules\/blackouts$/, (user, body) => addBlackout(user, body)],
+  ["POST", /^\/api\/schedules\/([^/]+)\/pause$/, (user, body, id) => pauseSchedule(user, id, body)],
+  ["GET", /^\/api\/schedules\/calendar$/, (user) => scheduleCalendar(user)],
+  ...opsRoutes(),
 ];
 
 export async function handleProtected(user, method, path, body) {
@@ -88,7 +120,7 @@ export async function handleProtected(user, method, path, body) {
     if (routeMethod !== method) continue;
     const match = path.match(pattern);
     if (!match) continue;
-    return handle(user, body || {}, ...match.slice(1));
+    return handle(user, checkSchema(method, path, body || {}), ...match.slice(1));
   }
   throw bad(404, "That endpoint does not exist.");
 }
@@ -101,8 +133,9 @@ export async function pushOps(user, operations) {
       results.push({ opId: operation?.id, ok: false, status: 400, error: "That sync operation is not valid." });
       break;
     }
+    const method = String(operation.method || "").toUpperCase();
     try {
-      const value = await handleProtected(user, operation.method, operation.path, operation.body || {});
+      const value = await runIdempotent(user, method, operation.path, operation.body || {}, operation.idempotencyKey, () => handleProtected(user, method, operation.path, operation.body || {}));
       results.push({ opId: operation.id, ok: true, status: 200, body: value });
     } catch (error) {
       results.push({ opId: operation.id, ok: false, status: error.status || 500, error: error.message || "Sync failed." });

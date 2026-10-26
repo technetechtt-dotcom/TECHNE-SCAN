@@ -11,13 +11,21 @@ const S = {
   demo: null,
   online: navigator.onLine,
   outbox: 0,
+  conflicts: 0,
+  conflictItems: [],
+  calendar: null,
+  syncLog: [],
+  flushAfter: 0,
+  flushDelay: 0,
+  searchHits: null,
+  mfaChallenge: "",
 };
 let cameraStream = null;
 let cameraTimer = null;
 let countTimer = null;
 
 function blank() {
-  return { branches: [], employees: [], assets: [], products: [], stocktakes: [], schedules: [], devices: [], imports: [], events: [], audits: [], notifications: [], company: null };
+  return { branches: [], employees: [], assets: [], products: [], stocktakes: [], schedules: [], devices: [], imports: [], events: [], audits: [], notifications: [], contractors: [], company: null };
 }
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 const allow = (cap) => Boolean(S.user?.caps?.includes(cap));
@@ -51,6 +59,8 @@ const NAV = [
   ["stocktakes", "Counts", "work"],
   ["schedules", "Schedules", "work"],
   ["inventory", "Inventory", "work"],
+  ["operations", "Operations", "work"],
+  ["conflicts", "Conflicts", "work"],
   ["scanner", "Scanner", "ops"],
   ["activity", "Activity", "ops"],
   ["intelligence", "Intelligence", "ops"],
@@ -63,10 +73,12 @@ function visibleNav() {
   return NAV.filter((item) => item[0] !== "branches" && item[0] !== "team" || (item[0] === "branches" && allow("branches")) || (item[0] === "team" && allow("employees")));
 }
 function navButton(item) {
-  const badge = item[0] === "alerts" && unread() ? `<span class="badge" id="alertcount">${unread()}</span>` : "";
-  return `<button class="${S.route === item[0] ? "active" : ""}" data-nav="${item[0]}"><span class="ico">•</span>${item[1]}${badge}</button>`;
+  const badge = item[0] === "alerts" && unread() ? `<span class="badge" id="alertcount">${unread()}</span>` : item[0] === "conflicts" && S.conflicts ? `<span class="badge">${S.conflicts}</span>` : "";
+  const label = globalThis.TechneI18n ? TechneI18n.t(item[1]) : item[1];
+  return `<button class="${S.route === item[0] ? "active" : ""}" data-nav="${item[0]}"><span class="ico">•</span>${label}${badge}</button>`;
 }
 function syncLabel() {
+  if (S.conflicts) return `Conflicts · ${S.conflicts} need a decision`;
   if (!S.online) return `Offline · ${S.outbox} waiting`;
   if (S.outbox) return `Syncing · ${S.outbox} waiting`;
   return "Synced";
@@ -74,7 +86,7 @@ function syncLabel() {
 
 function shell() {
   const items = visibleNav();
-  document.getElementById("app").innerHTML = `<div class="layout"><aside class="side"><div class="brand"><div class="brand-mark">T</div><div><strong>TECHNE SCAN</strong><small>${esc(S.user.companyName || "INTELLIGENCE")}</small></div></div><div class="nav-title">WORKSPACE</div><div class="nav">${items.filter((item) => item[2] === "work").map(navButton).join("")}</div><div class="nav-title">OPERATIONS</div><div class="nav">${items.filter((item) => item[2] !== "work").map(navButton).join("")}</div><div class="sidefoot"><span id="syncstate">${esc(syncLabel())}</span><small>${esc(S.user.name)} · ${esc(S.user.role)}. Records sync to your company database and stay in this browser while offline.</small></div></aside><div class="main"><header class="topbar"><div class="crumb">${esc(S.user.companyName)} / <strong>${esc(items.find((item) => item[0] === S.route)?.[1] || "More")}</strong></div><div class="topright"><span class="syncdot" id="syncstate-top">${esc(syncLabel())}</span><button class="avatar" data-act="account" type="button">${esc(S.user.name.slice(0, 2).toUpperCase())}</button></div></header><main class="content" id="page"></main></div></div><nav class="bottomnav">${[["dashboard", "Home"], ["assets", "Assets"], ["stocktakes", "Counts"], ["alerts", "Alerts"], ["more", "More"]].map((item) => `<button data-nav="${item[0]}" class="${S.route === item[0] ? "active" : ""}"><span>•</span>${item[1]}</button>`).join("")}</nav><div id="overlay"></div>`;
+  document.getElementById("app").innerHTML = `<div class="layout"><aside class="side"><div class="brand"><div class="brand-mark">T</div><div><strong>TECHNE SCAN</strong><small>${esc(S.user.companyName || "INTELLIGENCE")}</small></div></div><div class="nav-title">WORKSPACE</div><div class="nav">${items.filter((item) => item[2] === "work").map(navButton).join("")}</div><div class="nav-title">OPERATIONS</div><div class="nav">${items.filter((item) => item[2] !== "work").map(navButton).join("")}</div><div class="sidefoot"><span id="syncstate">${esc(syncLabel())}</span><small>${esc(S.user.name)} · ${esc(S.user.role)}. Records sync to your company database and stay in this browser while offline.</small></div></aside><div class="main"><header class="topbar"><div class="crumb">${esc(S.user.companyName)} / <strong>${esc(globalThis.TechneI18n ? TechneI18n.t(items.find((item) => item[0] === S.route)?.[1] || "More") : (items.find((item) => item[0] === S.route)?.[1] || "More"))}</strong></div><form id="globalsearch" class="topsearch"><input name="q" aria-label="Search assets, products, and counts" placeholder="Search"></form><div class="topright"><button class="btn light" type="button" data-act="scan-qr">Scan</button><span class="syncdot" id="syncstate-top">${esc(syncLabel())}</span><button class="avatar" data-act="account" type="button">${esc(S.user.name.slice(0, 2).toUpperCase())}</button></div></header><main class="content" id="page"></main></div></div><nav class="bottomnav">${[["dashboard", "Home"], ["assets", "Assets"], ["stocktakes", "Counts"], ["alerts", "Alerts"], ["more", "More"]].map((item) => `<button data-nav="${item[0]}" class="${S.route === item[0] ? "active" : ""}"><span>•</span>${item[1]}</button>`).join("")}</nav><div id="overlay"></div>`;
   render();
 }
 function render() {
@@ -117,7 +129,8 @@ function dashboard() {
   const overdue = out.filter((asset) => asset.due && asset.due < today());
   const open = S.data.stocktakes.filter((item) => item.status === "active");
   const mine = open.filter((item) => item.assignedEmployeeId === S.user.id);
-  return header("Operations hub", `Good day, ${esc(S.user.companyName)}`, "Assets, counts, and schedules for your branch.", (allow("assets") ? btn("+ Check out", "new-checkout", "green") : "") + (allow("stocktakes") ? btn("+ Start count", "new-stocktake") : "")) +
+  const roleTitle = { owner: "Company overview", admin: "Company overview", manager: "Branch work", supervisor: "Reviews waiting", clerk: "Your tasks today", viewer: "Read only" }[S.user.role] || "Operations hub";
+  return header(roleTitle, `Good day, ${esc(S.user.companyName)}`, "Assets, counts, and schedules for your branch.", (allow("assets") ? btn("+ Check out", "new-checkout", "green") : "") + (allow("stocktakes") ? btn("+ Start count", "new-stocktake") : "")) +
     `<div class="stats">${[["Assets", S.data.assets.length, "Tracked"], ["Checked out", out.length, "With staff"], ["Open counts", open.length, "In progress"], ["Overdue", overdue.length, "Need a return"]].map((item) => `<div class="stat"><div class="k">${item[0]}</div><div class="n">${item[1]}</div><div class="tag">${item[2]}</div></div>`).join("")}</div>` +
     `<div class="panels"><div><section class="panel"><h3>Assigned to you</h3>${mine.map((item) => `<div class="countrow"><div><strong>${esc(item.name)}</strong><div class="muted">${item.lines.length} products</div></div><button class="smallbtn" data-act="stocktake:${item.id}">Open</button></div>`).join("") || empty("Nothing assigned", "Scheduled counts land here when they are assigned to you.")}</section><section class="panel"><h3>Recent custody</h3>${S.data.events.slice(0, 5).map((event) => `<div class="countrow"><div><strong>${esc(S.data.assets.find((asset) => asset.id === event.assetId)?.name || "Asset")}</strong><div class="muted">${esc(event.person)} · ${fmt(event.at)}</div></div>${status(event.kind === "out" ? "out" : "available")}</div>`).join("") || empty("No movements", "Check-outs and returns will appear here.")}</section></div><div><section class="panel"><h3>Overdue returns</h3>${overdue.map((asset) => `<div class="countrow"><div><strong>${esc(asset.name)}</strong><div class="muted">${esc(asset.holder)} · due ${esc(asset.due)}</div></div><span class="pill red">Overdue</span></div>`).join("") || `<div class="notice"><strong>Returns are up to date</strong>${out.length} asset${out.length === 1 ? " is" : "s are"} checked out.</div>`}</section><section class="panel"><h3>Next scheduled counts</h3>${S.data.schedules.slice(0, 4).map((item) => `<div class="countrow"><div><strong>${esc(item.name)}</strong><div class="muted">${esc(item.frequency)} · ${fmt(item.nextRunAt)}</div></div><span class="pill">Automatic</span></div>`).join("") || empty("No schedules", "A daily, weekly, or monthly count runs on its own while the server is up.")}</section></div></div>`;
 }
@@ -138,8 +151,9 @@ function stocktakes() {
     `<section class="panel"><div class="tablewrap"><table><thead><tr><th>Session</th><th>Scope</th><th>Branch</th><th>Assigned</th><th>Status</th><th></th></tr></thead><tbody>${S.data.stocktakes.map((item) => `<tr><td><strong>${esc(item.name)}</strong><div class="smalls">${item.lines.length} products</div></td><td>${esc(item.scope === "full" ? "Full inventory" : `${item.scope}: ${item.scopeValue}`)}</td><td>${esc(branchName(item.branchId))}</td><td>${esc(employeeName(item.assignedEmployeeId))}</td><td>${status(item.status)}</td><td><button class="smallbtn" data-act="stocktake:${item.id}">${item.status === "active" ? "Continue" : "Review"}</button></td></tr>`).join("")}</tbody></table>${S.data.stocktakes.length ? "" : empty("No counts yet", "Start one, or wait for a schedule to open it.")}</div></section>`;
 }
 function schedules() {
+  const upcoming = (S.calendar?.items || S.data.schedules).map((item) => `<div class="countrow"><div><strong>${esc(item.name)}</strong><div class="muted">${esc(item.frequency)} · ${esc(item.timeOfDay || item.time_of_day || "")}${item.paused ? " · paused" : ""}</div></div><span>${fmt(item.nextRunAt)}</span></div>`).join("");
   return header("Automation", "Count schedules", "The server opens these counts at the chosen time in the company timezone.", allow("schedules") ? btn("+ New schedule", "new-schedule", "green") : "") +
-    `<section class="panel"><div class="tablewrap"><table><thead><tr><th>Schedule</th><th>Repeat</th><th>Next run</th><th>Assigned</th><th></th></tr></thead><tbody>${S.data.schedules.map((item) => `<tr><td><strong>${esc(item.name)}</strong><div class="smalls">${esc(item.scope)} ${esc(item.scopeValue)}</div></td><td>${esc(item.frequency)} · ${esc(item.timeOfDay)}</td><td>${fmt(item.nextRunAt)}</td><td>${esc(employeeName(item.assignedEmployeeId))}</td><td>${allow("schedules") ? `<button class="smallbtn" data-act="run-schedule:${item.id}">Run now</button> <button class="smallbtn" data-act="remove-schedule:${item.id}">Delete</button>` : ""}</td></tr>`).join("")}</tbody></table>${S.data.schedules.length ? "" : empty("No schedules", "Create a daily, weekly, or monthly template.")}</div></section><div class="notice">Schedules run while the Techne Scan server is running. A count is not opened twice for the same due time.</div>`;
+    `<section class="panel"><h3>Upcoming</h3>${upcoming || empty("No upcoming counts", "Active schedules appear here by their next run.")}</section><section class="panel"><div class="tablewrap"><table><thead><tr><th>Schedule</th><th>Repeat</th><th>Next run</th><th>Assigned</th><th></th></tr></thead><tbody>${S.data.schedules.map((item) => `<tr><td><strong>${esc(item.name)}</strong><div class="smalls">${esc(item.scope)} ${esc(item.scopeValue)}</div></td><td>${esc(item.frequency)} · ${esc(item.timeOfDay)}</td><td>${fmt(item.nextRunAt)}</td><td>${esc(employeeName(item.assignedEmployeeId))}</td><td>${allow("schedules") ? `<button class="smallbtn" data-act="run-schedule:${item.id}">Run now</button> <button class="smallbtn" data-act="remove-schedule:${item.id}">Delete</button>` : ""}</td></tr>`).join("")}</tbody></table>${S.data.schedules.length ? "" : empty("No schedules", "Create a daily, weekly, or monthly template.")}</div></section><div class="notice">Schedules run while the Techne Scan server is running. A count is not opened twice for the same due time.</div>`;
 }
 function scanner() {
   return header("Devices", "Scanner imports", "Upload the OPN-2001 Companion CSV, then apply the rows to an open count.", allow("imports") ? btn("Import CSV", "import-csv", "green") + btn("Sample CSV", "sample-csv") : "") +
@@ -164,7 +178,12 @@ function branches() {
 }
 function team() {
   return header("Access", "Team", "Owners and admins see every branch. Everyone else is limited to their own branch.", btn("+ Employee", "new-employee", "green")) +
-    `<section class="panel"><div class="tablewrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Branch</th><th>Status</th></tr></thead><tbody>${S.data.employees.map((person) => `<tr><td><strong>${esc(person.name)}</strong></td><td>${esc(person.email || "—")}</td><td>${esc(person.role)}</td><td>${esc(branchName(person.branchId))}</td><td>${person.active ? status("available") : status("completed")}</td></tr>`).join("")}</tbody></table></div></section>`;
+    `<section class="panel"><div class="tablewrap"><table><thead><tr><th>Name</th><th>Code</th><th>Email</th><th>Role</th><th>Branch</th><th>Status</th></tr></thead><tbody>${S.data.employees.map((person) => `<tr><td><strong>${esc(person.name)}</strong></td><td><span class="barcode">${esc(person.publicId || "—")}</span></td><td>${esc(person.email || "—")}</td><td>${esc(person.role)}</td><td>${esc(branchName(person.branchId))}</td><td>${person.active ? status("available") : status("completed")}</td></tr>`).join("")}</tbody></table></div></section>`;
+}
+function conflicts() {
+  const rows = S.conflictItems || [];
+  return header("Sync", "Conflicts", "These changes were rejected by the server. Retry sends them again. Discard removes them from this device.", "") +
+    `<section class="panel">${rows.map((item) => `<div class="countrow"><div><strong>${esc(item.method)} ${esc(item.path)}</strong><div class="muted">${esc(item.error || "The server rejected this change.")}</div></div><div>${btn("Retry", `retry-conflict:${item.id}`, "green")}${btn("Discard", `drop-conflict:${item.id}`)}</div></div>`).join("") || empty("No conflicts", "Rejected sync items stay here until you retry or discard them.")}</section>`;
 }
 function intelligence() {
   const intel = S.intel;
@@ -175,13 +194,13 @@ function morePage() {
   const items = visibleNav().filter((item) => !["dashboard", "assets", "stocktakes", "alerts"].includes(item[0]));
   return header("Menu", "More", "The rest of the workspace.") + `<section class="panel"><div class="shortcuts">${items.map((item) => `<button class="shortcut" data-nav="${item[0]}"><strong>${esc(item[1])}</strong></button>`).join("")}</div></section>`;
 }
-const pages = { dashboard, assets, inventory, stocktakes, schedules, scanner, activity, alerts, devices, branches, team, intelligence, more: morePage };
+const pages = { dashboard, assets, inventory, stocktakes, schedules, scanner, activity, alerts, devices, branches, team, intelligence, conflicts, operations: () => TechneOps.page(), more: morePage };
 
 function formModal(title, sub, body, submit = "Save") {
   return `<div class="modalshade"><div class="modal"><h2>${title}</h2><p class="sub">${sub}</p><form id="actionform"><div class="formgrid">${body}</div><div class="modalactions"><button type="button" class="btn light" data-act="close">Cancel</button><button class="btn green" type="submit">${submit}</button></div></form></div></div>`;
 }
 function scopeFields() {
-  return select("scope", "Scope", ["full", "aisle", "department", "category", "range"].map((value) => ({ value, label: value === "full" ? "Full inventory" : value === "range" ? "SKU prefix" : value }))) + field("scopeValue", "Scope value", "text", "", 'placeholder="Aisle 1"');
+  return select("scope", "Scope", ["full", "aisle", "department", "category", "range", "shelf", "rack", "bin", "abc", "list", "combined"].map((value) => ({ value, label: value === "full" ? "Full inventory" : value === "range" ? "SKU prefix" : value === "list" ? "SKU list" : value === "abc" ? "ABC class" : value === "combined" ? "Department + aisle + shelf + category" : value }))) + field("scopeValue", "Scope value", "text", "", 'placeholder="Aisle 1 or SKU-1,SKU-2"') + field("filterDepartment", "Combined department") + field("filterAisle", "Combined aisle") + field("filterShelf", "Combined shelf") + field("filterCategory", "Combined category");
 }
 function qr(value) {
   try {
@@ -199,32 +218,35 @@ function qr(value) {
     return `<strong>${esc(error.message)}</strong>`;
   }
 }
-function labelBlock(code) {
+function labelBlock(code, qrCode) {
   if (!code) return `<div class="warn">Sync this record before printing its permanent label.</div>`;
-  return `<div class="print-label"><div class="qrframe">${qr(code)}</div><div class="qrframe">${code128Svg(code)}</div><h3>${esc(code)}</h3><p>QR for phones. Code 128 for the OPN-2001.</p></div>`;
+  return `<div class="print-label"><div class="qrframe">${qr(qrCode || code)}</div><div class="qrframe">${code128Svg(code)}</div><h3>${esc(code)}</h3><p>Signed QR for phones. Code 128 stays the plain id for the OPN-2001.</p></div>`;
 }
 function modalHtml() {
+  const extra = globalThis.TechneOps?.modal?.();
+  if (extra) return extra;
   if (S.modal === "new-asset") return formModal("Register an asset", "A permanent id is assigned when this reaches the server.", branchOptions() + field("name", "Asset name", "text", "", "required") + field("serial", "Serial number") + select("category", "Category", ["IT Equipment", "Tools", "AV Equipment", "Vehicles", "Furniture", "Other"].map((value) => ({ value, label: value }))) + field("department", "Department", "text", "IT", "required") + field("location", "Current location", "text", "Head Office", "required") + select("condition", "Condition", ["Good", "Fair", "Needs attention"].map((value) => ({ value, label: value }))), "Create asset");
   if (S.modal === "new-product") return formModal("Add product", "The opening quantity is the first ledger entry.", branchOptions() + field("name", "Product name", "text", "", "required") + field("sku", "Barcode / SKU", "text", "", "required") + field("department", "Department", "text", "Retail", "required") + field("category", "Category", "text", "General", "required") + field("aisle", "Aisle", "text", "Aisle 1", "required") + field("qty", "Opening quantity", "number", "0", 'min="0" required'), "Add product");
   if (S.modal === "new-checkout" || S.modal === "quick-checkin") {
     const checkin = S.modal === "quick-checkin";
     const list = S.data.assets.filter((asset) => asset.status === (checkin ? "out" : "available"));
-    return formModal(checkin ? "Check in" : "Check out", checkin ? "Record who received it, its condition, and where it is now." : "Record who has the asset and when it is due.", select("asset", "Asset", list.map((asset) => ({ value: asset.id, label: `${asset.publicId} · ${asset.name}` }))) + field("person", checkin ? "Received by" : "Issued to", "text", "", "required") + (checkin ? select("condition", "Condition", ["Good", "Fair", "Damaged"].map((value) => ({ value, label: value }))) + field("location", "Return location", "text", "", "required") : field("due", "Expected return", "date", today(), "required")) + field("notes", "Notes"), checkin ? "Confirm check-in" : "Confirm check-out");
+    const people = S.data.employees.filter((person) => person.active).map((person) => ({ value: person.name, label: `${person.name} · ${person.publicId || person.role}` })).concat((S.data.contractors || []).map((person) => ({ value: person.name, label: `${person.name} · contractor` })));
+    return formModal(checkin ? "Check in" : "Check out", checkin ? "Record who received it, its condition, and where it is now." : "Issue it to someone in this company. Scan or type their employee code, then type their name to confirm.", select("asset", "Asset", list.map((asset) => ({ value: asset.id, label: `${asset.publicId} · ${asset.name}` }))) + (checkin ? field("person", "Received by", "text", "", "required") : select("person", "Issued to", people) + field("employeeCode", "Employee code", "text", "", 'placeholder="TT-EMP-001"')) + field("acknowledgement", "Type their name to acknowledge", "text", "", "required") + (checkin ? select("condition", "Condition", ["Good", "Fair", "Damaged"].map((value) => ({ value, label: value }))) + field("location", "Return location", "text", "", "required") : field("due", "Expected return", "date", today(), "required")) + field("notes", "Notes"), checkin ? "Confirm check-in" : "Confirm check-out");
   }
   if (S.modal === "new-stocktake" || S.modal === "new-schedule") {
     const schedule = S.modal === "new-schedule";
-    return formModal(schedule ? "Schedule a count" : "Start a count", schedule ? "This will open itself at the next matching time." : "The snapshot is taken when the server accepts the count.", branchOptions() + field("name", "Name", "text", schedule ? "Weekly aisle count" : "New stocktake", "required") + scopeFields() + (schedule ? select("frequency", "Frequency", ["daily", "weekly", "monthly"].map((value) => ({ value, label: value }))) + field("timeOfDay", "Time", "time", "08:00", "required") + select("weekday", "Weekday", ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((label, value) => ({ value: String(value), label }))) + field("dayOfMonth", "Day of month", "number", "1", 'min="1" max="28"') : "") + (allow("assign") || schedule ? select("assignedEmployeeId", "Assign to", peopleOptions(S.user.branchId)) : ""), schedule ? "Save schedule" : "Start count");
+    return formModal(schedule ? "Schedule a count" : "Start a count", schedule ? "This will open itself at the next matching time." : "The snapshot is taken when the server accepts the count. Open the scope preview on Operations before a large count.", branchOptions() + field("name", "Name", "text", schedule ? "Weekly aisle count" : "New stocktake", "required") + scopeFields() + (schedule ? select("frequency", "Frequency", ["daily", "weekly", "monthly", "interval"].map((value) => ({ value, label: value }))) + field("timeOfDay", "Time", "time", "08:00", "required") + field("intervalDays", "Every N days", "number", "14", 'min="1" max="365"') + select("weekday", "Weekday", ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((label, value) => ({ value: String(value), label }))) + field("dayOfMonth", "Day of month", "number", "1", 'min="1" max="28"') + select("abcClass", "ABC class", [{ value: "", label: "Any" }, { value: "A", label: "A" }, { value: "B", label: "B" }, { value: "C", label: "C" }]) : "") + (allow("assign") || schedule ? select("assignedEmployeeId", "Assign to", peopleOptions(S.user.branchId)) : ""), schedule ? "Save schedule" : "Start count");
   }
   if (S.modal === "new-branch") return formModal("New branch", "Branch codes are unique inside the company.", field("name", "Branch name", "text", "", "required") + field("code", "Code", "text", "", "required") + field("address", "Address"), "Create branch");
   if (S.modal === "new-employee") return formModal("New employee", "They will sign in with this email and password.", field("name", "Name", "text", "", "required") + field("email", "Email", "email", "", "required") + select("role", "Role", ["admin", "manager", "supervisor", "clerk", "viewer"].filter((role) => S.user.role === "owner" || role !== "admin").concat(S.user.role === "owner" ? ["owner"] : []).filter((role, index, list) => list.indexOf(role) === index).map((value) => ({ value, label: value }))) + branchOptions() + field("password", "Temporary password", "password", "", "required minlength=\"10\""), "Create login");
-  if (S.modal === "new-device") return formModal("Register a device", "Tie later CSV imports to this scanner.", branchOptions() + field("name", "Device name", "text", "", "required") + select("kind", "Type", ["OPN-2001", "Phone", "Other"].map((value) => ({ value, label: value }))) + field("serial", "Serial"), "Save device");
+  if (S.modal === "new-device") return formModal("Register a device", "Tie later CSV imports to this scanner.", branchOptions() + field("name", "Device name", "text", "", "required") + select("kind", "Type", ["OPN-2001", "USB", "Bluetooth", "Phone", "Other"].map((value) => ({ value, label: value }))) + field("serial", "Serial") + field("firmware", "Firmware"), "Save device");
   if (S.modal === "import-csv") return formModal("Import scan CSV", "Rows are stored first. Apply them to an open count from the import list.", branchOptions() + select("deviceId", "Device", [{ value: "", label: "No device" }, ...S.data.devices.map((device) => ({ value: device.id, label: device.name }))]) + `<div class="field"><label for="f_file">CSV file</label><input id="f_file" name="file" type="file" accept=".csv,text/csv" required></div>`, "Import");
   if (S.modal === "company") return formModal("Company settings", "Schedules use this timezone.", field("name", "Company name", "text", S.data.company?.name || S.user.companyName, "required") + field("timezone", "Timezone", "text", S.user.timezone, "required"), "Save");
-  if (S.modal === "account") return `<div class="modalshade"><div class="modal"><h2>Your account</h2><p class="sub">${esc(S.user.email)} · ${esc(S.user.role)} · ${esc(branchName(S.user.branchId))}</p><form id="actionform"><div class="formgrid">${field("current", "Current password", "password")}${field("next", "New password", "password", "", 'minlength="10"')}</div><div class="modalactions"><button type="button" class="btn light" data-act="close">Close</button><button type="button" class="btn light" data-act="sign-out">Sign out</button><button class="btn green" type="submit">Change password</button></div></form></div></div>`;
+  if (S.modal === "account") return `<div class="modalshade"><div class="modal"><h2>Your account</h2><p class="sub">${esc(S.user.email)} · ${esc(S.user.role)} · ${esc(branchName(S.user.branchId))}</p><form id="actionform"><div class="formgrid">${field("current", "Current password", "password")}${field("next", "New password", "password", "", 'minlength="10"')}</div><div class="modalactions"><button type="button" class="btn light" data-act="close">Close</button><button type="button" class="btn light" data-act="privacy">Privacy</button><button type="button" class="btn light" data-act="mfa">Authenticator</button><button type="button" class="btn light" data-act="theme">Theme</button><button type="button" class="btn light" data-act="language">Language</button><button type="button" class="btn light" data-act="sign-out">Sign out</button><button class="btn green" type="submit">Change password</button></div></form></div></div>`;
   if (S.modal?.startsWith("asset:")) {
     const asset = S.data.assets.find((item) => item.id === S.modal.slice(6));
     if (!asset) return "";
-    return `<div class="modalshade"><div class="modal"><h2>${esc(asset.name)}</h2><p class="sub">${esc(asset.publicId || "Pending sync")} · ${esc(asset.serial || "No serial")}</p><div class="split" style="margin-top:18px">${labelBlock(asset.publicId)}<div><p><strong>Status:</strong> ${status(asset.status)}</p><p><strong>Branch:</strong> ${esc(branchName(asset.branchId))}</p><p><strong>Location:</strong> ${esc(asset.location)}</p><p><strong>Custodian:</strong> ${esc(asset.holder || "Unassigned")}</p><p><strong>Due:</strong> ${esc(asset.due || "—")}</p><p><strong>Condition:</strong> ${esc(asset.condition)}</p></div></div><div class="modalactions noprint">${btn("Print label", "print")}${btn("Close", "close")}</div></div></div>`;
+    return `<div class="modalshade"><div class="modal"><h2>${esc(asset.name)}</h2><p class="sub">${esc(asset.publicId || "Pending sync")} · ${esc(asset.serial || "No serial")}</p><div class="split" style="margin-top:18px">${labelBlock(asset.publicId, asset.qrPayload)}<div><p><strong>Status:</strong> ${status(asset.status)}</p><p><strong>Branch:</strong> ${esc(branchName(asset.branchId))}</p><p><strong>Location:</strong> ${esc(asset.location)}</p><p><strong>Custodian:</strong> ${esc(asset.holder || "Unassigned")}</p><p><strong>Due:</strong> ${esc(asset.due || "—")}</p><p><strong>Condition:</strong> ${esc(asset.condition)}</p></div></div><div class="modalactions noprint">${btn("Print label", "print")}${btn("Close", "close")}</div></div></div>`;
   }
   if (S.modal?.startsWith("product:")) {
     const product = S.data.products.find((item) => item.id === S.modal.slice(8));
@@ -302,7 +324,7 @@ async function refresh() {
   const data = await TechneAPI.send("GET", "/api/sync/pull");
   const pending = await TechneIDB.outbox();
   const blocked = new Set(pending.map((item) => item.bucket));
-  for (const key of ["branches", "employees", "assets", "products", "stocktakes", "schedules", "devices", "imports", "events", "audits", "notifications"]) {
+  for (const key of ["branches", "employees", "assets", "products", "stocktakes", "schedules", "devices", "imports", "events", "audits", "notifications", "contractors"]) {
     if (!blocked.has(key)) S.data[key] = data[key] || [];
   }
   S.data.company = data.company;
@@ -310,26 +332,27 @@ async function refresh() {
     S.user.companyName = data.company.name;
     S.user.timezone = data.company.timezone;
   }
-  S.outbox = pending.length;
+  noteQueue(pending);
   await TechneIDB.set("snapshot", S.data);
   await TechneIDB.set("user", S.user);
 }
 async function run(method, path, body, bucket, applyLocal) {
   if (applyLocal) applyLocal();
   await TechneIDB.set("snapshot", S.data);
+  const idempotencyKey = crypto.randomUUID();
   try {
     if (!navigator.onLine) {
       const error = new Error("offline");
       error.offline = true;
       throw error;
     }
-    await TechneAPI.send(method, path, body);
+    await TechneAPI.send(method, path, body, idempotencyKey);
     await refresh();
     S.banner = "";
   } catch (error) {
     if (error.offline) {
-      await TechneIDB.enqueue({ id: crypto.randomUUID(), method, path, body, bucket });
-      S.outbox = (await TechneIDB.outbox()).length;
+      await TechneIDB.enqueue({ id: crypto.randomUUID(), method, path, body, bucket, idempotencyKey });
+      noteQueue(await TechneIDB.outbox());
       S.banner = "Saved on this device. It will sync when the connection returns.";
     } else if (error.unauthorized) {
       await TechneIDB.clear();
@@ -342,21 +365,37 @@ async function run(method, path, body, bucket, applyLocal) {
   }
   render();
 }
+function noteQueue(pending) {
+  S.conflictItems = pending.filter((item) => item.status === "conflict");
+  S.conflicts = S.conflictItems.length;
+  S.outbox = pending.length - S.conflicts;
+}
 async function flush() {
   if (!navigator.onLine || !S.user) return;
-  const operations = await TechneIDB.outbox();
+  if (S.flushAfter && Date.now() < S.flushAfter) return;
+  const operations = (await TechneIDB.outbox()).filter((item) => item.status !== "conflict");
   if (!operations.length) return;
   try {
     const result = await TechneAPI.send("POST", "/api/sync/push", { operations });
     for (const row of result.results) {
-      if (row.ok || row.status < 500) await TechneIDB.drop(row.opId);
-      else break;
+      S.syncLog.unshift({ ok: row.ok, status: row.status, error: row.error || "", at: new Date().toISOString() });
+      if (row.ok || (row.status < 500 && row.status !== 409)) await TechneIDB.drop(row.opId);
+      else if (row.status === 409) {
+        await TechneIDB.mark(row.opId, { status: "conflict", error: row.error || "The server rejected this change." });
+        break;
+      } else break;
     }
+    S.syncLog = S.syncLog.slice(0, 20);
+    await TechneIDB.logSync(S.syncLog[0] || { ok: true });
+    S.flushDelay = 0;
+    S.flushAfter = 0;
     const failed = result.results.find((row) => !row.ok && row.status < 500);
-    if (failed) S.banner = failed.error;
+    if (failed) S.banner = failed.status === 409 ? `Conflict: ${failed.error} Open Conflicts to retry or discard it.` : failed.error;
     await refresh();
     render();
   } catch (error) {
+    S.flushDelay = Math.min(60000, (S.flushDelay || 2000) * 2);
+    S.flushAfter = Date.now() + S.flushDelay;
     if (!error.offline) S.banner = error.message;
   }
 }
@@ -365,6 +404,7 @@ function setCount(stocktakeId, productId, value) {
   const line = stocktake?.lines.find((item) => item.productId === productId);
   if (!line || stocktake.status !== "active") return;
   line.counted = value;
+  TechneIDB.set("snapshot", S.data);
   clearTimeout(countTimer);
   countTimer = setTimeout(() => {
     run("PUT", `/api/stocktakes/${stocktakeId}/counts`, { counts: [{ productId, count: value }] }, "stocktakes");
@@ -374,21 +414,37 @@ function setCount(stocktakeId, productId, value) {
 }
 
 function loginHtml() {
+  if (S.authMode === "mfa") {
+    return `<div class="login-wrap"><form class="login-card" id="mfaform"><div class="eyebrow">TECHNE SCAN</div><h1>Authenticator code</h1><p class="sub">Enter the 6-digit code, or a one-time backup code.</p>${S.banner ? `<div class="warn">${esc(S.banner)}</div>` : ""}${field("code", "Code", "text", "", "required autocomplete=\"one-time-code\" inputmode=\"numeric\"")}<div class="modalactions"><button class="btn green" type="submit">Verify</button></div></form></div>`;
+  }
+  if (S.authMode === "forgot") {
+    return `<div class="login-wrap"><form class="login-card" id="forgotform"><div class="eyebrow">TECHNE SCAN</div><h1>Reset password</h1><p class="sub">Ask for a reset token, then choose a new password. Production mail is sent only when an email webhook is configured.</p>${S.banner ? `<div class="warn">${esc(S.banner)}</div>` : ""}${field("email", "Email", "email", "", "required")}${field("token", "Reset token")}${field("password", "New password", "password")}<div class="modalactions"><button class="btn green" type="submit">Continue</button><button class="btn light" type="button" data-act="show-login">Back</button></div></form></div>`;
+  }
   const setup = S.authMode === "setup";
-  return `<div class="login-wrap"><form class="login-card" id="${setup ? "setupform" : "loginform"}"><div class="eyebrow">TECHNE SCAN</div><h1>${setup ? "Create a company" : "Sign in"}</h1><p class="sub">${setup ? "This creates a separate company, its first branch, and an owner login." : "Your records belong to one company and sync from this browser."}</p>${S.demo && !setup ? `<div class="demo-box"><strong>Local demo</strong><div>Owner ${esc(S.demo.email)} · ${esc(S.demo.password)}</div><div>Clerk thabo@techne.local uses the same password and cannot approve counts.</div></div>` : ""}${S.banner ? `<div class="warn">${esc(S.banner)}</div>` : ""}<div class="formgrid">${setup ? field("companyName", "Company name", "text", "", "required") + field("timezone", "Timezone", "text", "Africa/Johannesburg", "required") + field("branchName", "First branch", "text", "Head Office", "required") + field("adminName", "Your name", "text", "", "required") : ""}${field("email", "Email", "email", "", "required")}${field("password", "Password", "password", "", setup ? 'required minlength="10"' : "required")}</div><div class="modalactions"><button class="btn green" type="submit">${setup ? "Create company" : "Sign in"}</button><button class="btn light" type="button" data-act="${setup ? "show-login" : "show-setup"}">${setup ? "I have a login" : "Create a company"}</button></div></form></div>`;
+  return `<div class="login-wrap"><form class="login-card" id="${setup ? "setupform" : "loginform"}"><div class="eyebrow">TECHNE SCAN</div><h1>${setup ? "Create a company" : "Sign in"}</h1><p class="sub">${setup ? "This creates a separate company, its first branch, and an owner login." : "Your records belong to one company and sync from this browser."}</p>${S.demo && !setup ? `<div class="demo-box"><strong>Local demo</strong><div>Owner ${esc(S.demo.email)} · ${esc(S.demo.password)}</div><div>Clerk thabo@techne.local uses the same password and cannot approve counts.</div></div>` : ""}${S.banner ? `<div class="warn">${esc(S.banner)}</div>` : ""}<div class="formgrid">${setup ? field("companyName", "Company name", "text", "", "required") + field("timezone", "Timezone", "text", "Africa/Johannesburg", "required") + field("branchName", "First branch", "text", "Head Office", "required") + field("adminName", "Your name", "text", "", "required") : ""}${field("email", "Email", "email", "", "required")}${field("password", "Password", "password", "", setup ? 'required minlength="10"' : "required")}</div><div class="modalactions"><button class="btn green" type="submit">${setup ? "Create company" : "Sign in"}</button><button class="btn light" type="button" data-act="${setup ? "show-login" : "show-setup"}">${setup ? "I have a login" : "Create a company"}</button>${setup ? "" : '<button class="btn light" type="button" data-act="show-forgot">Forgot password</button>'}</div></form></div>`;
 }
 function showLogin() {
   stopCamera();
   document.getElementById("app").innerHTML = loginHtml();
 }
 async function enter(user) {
+  const previous = await TechneIDB.get("user");
+  if (previous && previous.id !== user.id) await TechneIDB.clear();
   S.user = user;
   S.banner = "";
+  S.calendar = null;
   await refresh();
   S.route = "dashboard";
   shell();
   loadIntel();
   flush();
+}
+async function loadCalendar() {
+  if (!S.user || !navigator.onLine) return;
+  try {
+    S.calendar = await TechneAPI.send("GET", "/api/schedules/calendar");
+    if (S.route === "schedules") render();
+  } catch { /* the schedule table still lists the next run */ }
 }
 async function loadIntel() {
   if (!S.user) return;
@@ -411,11 +467,38 @@ function dataOf(form) {
 }
 async function onSubmit(event) {
   const form = event.target;
-  if (form.id === "loginform" || form.id === "setupform" || form.id === "actionform" || form.id === "manualasset" || form.id === "askform" || form.id === "countform") event.preventDefault();
+  if (["loginform", "setupform", "actionform", "manualasset", "askform", "countform", "mfaform", "forgotform", "globalsearch"].includes(form.id)) event.preventDefault();
   try {
+    if (form.id === "globalsearch") {
+      S.searchHits = await TechneAPI.send("GET", `/api/search?q=${encodeURIComponent(dataOf(form).q || "")}`);
+      S.route = "operations";
+      return shell();
+    }
+    if (form.id === "mfaform") {
+      const result = await TechneAPI.send("POST", "/api/login/mfa", { challenge: S.mfaChallenge, code: dataOf(form).code });
+      return enter(result.user);
+    }
+    if (form.id === "forgotform") {
+      const body = dataOf(form);
+      if (body.token && body.password) {
+        await TechneAPI.send("POST", "/api/password/reset", body);
+        S.authMode = "login";
+        S.banner = "Password updated. Sign in with the new password.";
+        return showLogin();
+      }
+      const result = await TechneAPI.send("POST", "/api/password/forgot", { email: body.email });
+      S.banner = result.resetToken ? `Development reset token: ${result.resetToken}` : "If that account exists, a reset token has been issued.";
+      return showLogin();
+    }
     if (form.id === "loginform") {
       const body = dataOf(form);
       const result = await TechneAPI.send("POST", "/api/login", body);
+      if (result.mfaRequired) {
+        S.mfaChallenge = result.challenge;
+        S.authMode = "mfa";
+        S.banner = "";
+        return showLogin();
+      }
       return enter(result.user);
     }
     if (form.id === "setupform") {
@@ -434,9 +517,10 @@ async function onSubmit(event) {
     if (modal === "account") {
       if (!body.current && !body.next) return;
       await TechneAPI.send("POST", "/api/me/password", body);
-      S.banner = "Password changed.";
-      S.modal = null;
-      return render();
+      await TechneIDB.clear();
+      S.user = null;
+      S.banner = "Password changed. Sign in again.";
+      return showLogin();
     }
     if (modal === "company") {
       const result = await TechneAPI.send("PATCH", "/api/company", body);
@@ -461,6 +545,13 @@ async function onSubmit(event) {
     const clientId = crypto.randomUUID();
     if (modal === "new-asset") S.data.assets.unshift({ id: clientId, branchId: body.branchId, publicId: "", name: body.name, category: body.category, department: body.department, location: body.location, serial: body.serial || "", status: "available", holder: "", due: "", condition: body.condition || "Good", version: 1 });
     if (modal === "new-product") S.data.products.unshift({ id: clientId, branchId: body.branchId, sku: body.sku, name: body.name, department: body.department, aisle: body.aisle, category: body.category, qty: Number(body.qty) || 0, version: 1 });
+    if (modal === "new-checkout" && body.employeeCode) {
+      const person = S.data.employees.find((item) => (item.publicId || "").toLowerCase() === body.employeeCode.trim().toLowerCase());
+      if (person) body.person = person.name;
+    }
+    if ((modal === "new-stocktake" || modal === "new-schedule") && body.scope === "combined") {
+      body.scopeValue = JSON.stringify({ department: body.filterDepartment || "", aisle: body.filterAisle || "", shelf: body.filterShelf || "", category: body.filterCategory || "" });
+    }
     if (modal === "new-checkout") {
       const asset = S.data.assets.find((item) => item.id === body.asset);
       if (asset) Object.assign(asset, { status: "out", holder: body.person, due: body.due });
@@ -523,6 +614,16 @@ async function action(name) {
     }
     return;
   }
+  if (name.startsWith("retry-conflict:")) {
+    await TechneIDB.mark(name.slice(15), { status: "pending", idempotencyKey: crypto.randomUUID(), error: "" });
+    noteQueue(await TechneIDB.outbox());
+    return flush();
+  }
+  if (name.startsWith("drop-conflict:")) {
+    await TechneIDB.drop(name.slice(14));
+    noteQueue(await TechneIDB.outbox());
+    return render();
+  }
   if (name === "sign-out") {
     try { await TechneAPI.send("POST", "/api/logout", {}); } catch { /* local sign-out still proceeds */ }
     await TechneIDB.clear();
@@ -535,7 +636,24 @@ async function action(name) {
   }
   if (name === "close") { S.modal = null; return render(); }
   if (name === "print") return window.print();
+  if (name === "show-forgot") { S.authMode = "forgot"; S.banner = ""; return showLogin(); }
   if (name === "show-login") { S.authMode = "login"; S.banner = ""; return showLogin(); }
+  if (name === "theme") {
+    const dark = !document.body.classList.contains("theme-dark");
+    document.body.classList.toggle("theme-dark", dark);
+    localStorage.setItem("techne-theme", dark ? "dark" : "light");
+    return;
+  }
+  if (name === "language") {
+    const order = ["en", "af", "tn"];
+    const next = order[(order.indexOf(TechneI18n.lang()) + 1) % order.length];
+    TechneI18n.set(next);
+    return shell();
+  }
+  if (name === "privacy" || name === "mfa") {
+    S.modal = name;
+    return render();
+  }
   if (name === "show-setup") { S.authMode = "setup"; S.banner = ""; return showLogin(); }
   if (name === "sample-csv") return download("scanner-sample.csv", [["barcode", "quantity"], ["BVG-001", 2], ["CLN-001", 1]]);
   if (name === "export-inventory") return download("inventory.csv", [["sku", "name", "branch", "aisle", "qty"], ...S.data.products.map((product) => [product.sku, product.name, branchName(product.branchId), product.aisle, product.qty])]);
@@ -587,11 +705,13 @@ document.addEventListener("click", (event) => {
   const target = event.target.closest("[data-nav],[data-act]");
   if (!target) return;
   if (target.dataset.nav) {
+    if (S.modal && !confirm("Leave this screen? Unsaved form entries on this page will be dropped. Work already saved on this device stays in the sync queue.")) return;
     stopCamera();
     S.route = target.dataset.nav;
     S.query = "";
     S.modal = null;
     if (S.route === "intelligence") loadIntel();
+    if (S.route === "schedules") loadCalendar();
     shell();
   } else action(target.dataset.act);
 });
@@ -611,11 +731,33 @@ document.addEventListener("input", (event) => {
     setCount(stocktakeId, productId, raw === "" ? null : Math.max(0, Math.floor(Number(raw) || 0)));
   }
 });
+window.addEventListener("beforeunload", (event) => {
+  if (S.user && (S.outbox || S.modal)) {
+    event.preventDefault();
+    event.returnValue = "";
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && S.modal) {
+    S.modal = null;
+    render();
+  }
+  if (event.key === "/" && !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) {
+    event.preventDefault();
+    document.querySelector("#globalsearch input")?.focus();
+  }
+});
 window.addEventListener("online", () => { S.online = true; flush(); });
 window.addEventListener("offline", () => { S.online = false; S.banner = "Offline. Changes stay on this device until the connection returns."; render(); });
 setInterval(() => { if (S.user && navigator.onLine) flush(); }, 20000);
 
 async function boot() {
+  if (localStorage.getItem("techne-theme") === "dark") document.body.classList.add("theme-dark");
+  if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
+  if (navigator.storage?.estimate) {
+    const estimate = await navigator.storage.estimate().catch(() => null);
+    if (estimate?.quota && estimate.usage / estimate.quota > 0.9) S.banner = "This browser is almost out of space. Sync before relying on offline storage.";
+  }
   await TechneIDB.open();
   const snapshot = await TechneIDB.get("snapshot");
   const cachedUser = await TechneIDB.get("user");
@@ -636,4 +778,5 @@ async function boot() {
   }
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(() => {});
 }
+globalThis.Techne = { S, esc, allow, btn, field, select, empty, header, branchName, today, fmt, status, run };
 boot();
