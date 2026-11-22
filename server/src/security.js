@@ -4,11 +4,11 @@ import { bad } from "./errors.js";
 
 const scrypt = promisify(scryptCb);
 const CAPS = {
-  owner: ["company", "branches", "employees", "assets", "products", "stocktakes", "approve", "schedules", "devices", "imports", "assign", "intelligence"],
-  admin: ["company", "branches", "employees", "assets", "products", "stocktakes", "approve", "schedules", "devices", "imports", "assign", "intelligence"],
-  manager: ["assets", "products", "stocktakes", "approve", "schedules", "devices", "imports", "assign", "intelligence"],
-  supervisor: ["assets", "products", "stocktakes", "approve", "imports", "assign", "intelligence"],
-  clerk: ["assets", "products", "stocktakes", "imports", "intelligence"],
+  owner: ["company", "branches", "employees", "assets", "products", "stocktakes", "approve", "schedules", "devices", "imports", "assign", "intelligence", "picking"],
+  admin: ["company", "branches", "employees", "assets", "products", "stocktakes", "approve", "schedules", "devices", "imports", "assign", "intelligence", "picking"],
+  manager: ["assets", "products", "stocktakes", "approve", "schedules", "devices", "imports", "assign", "intelligence", "picking"],
+  supervisor: ["assets", "products", "stocktakes", "approve", "imports", "assign", "intelligence", "picking"],
+  clerk: ["assets", "products", "stocktakes", "imports", "intelligence", "picking"],
   viewer: ["intelligence"],
 };
 

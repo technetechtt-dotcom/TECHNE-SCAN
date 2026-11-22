@@ -15,6 +15,8 @@ const STRINGS = {
     Branches: "Takke",
     Team: "Span",
     More: "Meer",
+    Picking: "Uitpluk",
+    Connections: "Verbindings",
     Home: "Tuis",
   },
   tn: {
@@ -33,6 +35,8 @@ const STRINGS = {
     Branches: "Makala",
     Team: "Setlhopha",
     More: "Tse dingwe",
+    Picking: "Go tlhopha",
+    Connections: "Dikgolagano",
     Home: "Gae",
   },
 };

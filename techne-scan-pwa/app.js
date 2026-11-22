@@ -25,7 +25,7 @@ let cameraTimer = null;
 let countTimer = null;
 
 function blank() {
-  return { branches: [], employees: [], assets: [], products: [], stocktakes: [], schedules: [], devices: [], imports: [], events: [], audits: [], notifications: [], contractors: [], reservations: [], company: null };
+  return { branches: [], employees: [], assets: [], products: [], stocktakes: [], schedules: [], devices: [], imports: [], events: [], audits: [], notifications: [], contractors: [], reservations: [], orders: [], waves: [], channels: [], company: null };
 }
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 const allow = (cap) => Boolean(S.user?.caps?.includes(cap));
@@ -59,6 +59,7 @@ const NAV = [
   ["stocktakes", "Counts", "work"],
   ["schedules", "Schedules", "work"],
   ["inventory", "Inventory", "work"],
+  ["picking", "Picking", "work"],
   ["operations", "Operations", "work"],
   ["conflicts", "Conflicts", "work"],
   ["scanner", "Scanner", "ops"],
@@ -68,9 +69,16 @@ const NAV = [
   ["devices", "Devices", "admin"],
   ["branches", "Branches", "admin"],
   ["team", "Team", "admin"],
+  ["channels", "Connections", "admin"],
 ];
 function visibleNav() {
-  return NAV.filter((item) => item[0] !== "branches" && item[0] !== "team" || (item[0] === "branches" && allow("branches")) || (item[0] === "team" && allow("employees")));
+  return NAV.filter((item) => {
+    if (item[0] === "branches") return allow("branches");
+    if (item[0] === "team") return allow("employees");
+    if (item[0] === "channels") return allow("company");
+    if (item[0] === "picking") return allow("picking");
+    return true;
+  });
 }
 function navButton(item) {
   const badge = item[0] === "alerts" && unread() ? `<span class="badge" id="alertcount">${unread()}</span>` : item[0] === "conflicts" && S.conflicts ? `<span class="badge">${S.conflicts}</span>` : "";
@@ -156,8 +164,9 @@ function schedules() {
     `<section class="panel"><h3>Upcoming</h3>${upcoming || empty("No upcoming counts", "Active schedules appear here by their next run.")}</section><section class="panel"><div class="tablewrap"><table><thead><tr><th>Schedule</th><th>Repeat</th><th>Next run</th><th>Assigned</th><th></th></tr></thead><tbody>${S.data.schedules.map((item) => `<tr><td><strong>${esc(item.name)}</strong><div class="smalls">${esc(item.scope)} ${esc(item.scopeValue)}</div></td><td>${esc(item.frequency)} · ${esc(item.timeOfDay)}</td><td>${fmt(item.nextRunAt)}</td><td>${esc(employeeName(item.assignedEmployeeId))}</td><td>${allow("schedules") ? `<button class="smallbtn" data-act="run-schedule:${item.id}">Run now</button> <button class="smallbtn" data-act="remove-schedule:${item.id}">Delete</button>` : ""}</td></tr>`).join("")}</tbody></table>${S.data.schedules.length ? "" : empty("No schedules", "Create a daily, weekly, or monthly template.")}</div></section><div class="notice">Schedules run while the Techne Scan server is running. A count is not opened twice for the same due time.</div>`;
 }
 function scanner() {
-  return header("Devices", "Scanner imports", "Upload the OPN-2001 Companion CSV, then apply the rows to an open count.", allow("imports") ? btn("Import CSV", "import-csv", "green") + btn("Sample CSV", "sample-csv") : "") +
-    `<div class="panels"><section class="panel"><h3>How a batch gets into a count</h3><div class="countrow"><strong>1. Scan on the device</strong><span class="pill">On device</span></div><div class="countrow"><strong>2. Export barcode, quantity CSV</strong><span class="pill">Companion app</span></div><div class="countrow"><strong>3. Import and apply to an open count</strong><span class="pill green">Available</span></div><p class="muted">Direct USB still needs the Opticon SDK on Windows. This screen records the device and applies the file.</p></section><section class="panel"><h3>Recent imports</h3>${S.data.imports.map((item) => `<div class="countrow"><div><strong>${esc(item.name)}</strong><div class="muted">${fmt(item.createdAt)} · ${item.lineCount} rows${item.appliedStocktakeId ? " · applied" : ""}</div></div>${item.appliedStocktakeId ? `<span class="pill green">Applied</span>` : `<button class="smallbtn" data-act="apply:${item.id}">Apply</button>`}</div>`).join("") || empty("No imports", "Upload a scanner CSV to begin.")}</section></div>`;
+  const wedge = localStorage.getItem("techne-wedge") === "1";
+  return header("Devices", "Scanner imports", "USB keyboard-wedge and HID input land in the open count. Batch files still import as CSV.", allow("imports") ? btn("Import CSV", "import-csv", "green") + btn("Sample CSV", "sample-csv") : "") +
+    `<div class="panels"><section class="panel"><h3>How a scan gets into a count</h3><div class="countrow"><strong>1. Phone camera</strong><span class="pill green">QR and barcodes</span></div><div class="countrow"><strong>2. USB keyboard wedge ${wedge ? "on" : "off"}</strong>${btn(wedge ? "Wedge on" : "Turn wedge on", "usb-wedge")}</div><div class="countrow"><strong>3. Opticon HID</strong>${btn("Connect HID", "connect-hid")}</div><div class="countrow"><strong>4. CSV batch</strong><span class="pill">Keeps repeated barcodes</span></div><p class="muted">Keyboard wedge and HID read live scans in this browser. They do not clear scanner memory. Opticon's Windows SDK is not included, and this install has not certified a physical unit.</p></section><section class="panel"><h3>Recent imports</h3>${S.data.imports.map((item) => `<div class="countrow"><div><strong>${esc(item.name)}</strong><div class="muted">${fmt(item.createdAt)} · ${item.lineCount} rows${item.appliedStocktakeId ? " · applied" : ""}</div></div>${item.appliedStocktakeId ? `<span class="pill green">Applied</span>` : `<button class="smallbtn" data-act="apply:${item.id}">Apply</button>`}</div>`).join("") || empty("No imports", "Upload a scanner CSV to begin.")}</section></div>`;
 }
 function activity() {
   const audits = S.data.audits.filter((item) => item.action === "stocktake.approve" || item.action === "import.apply");
@@ -175,7 +184,7 @@ function planCards() {
   const billing = S.data.company?.billing;
   if (!billing) return "";
   const current = billing.plans.find((plan) => plan.current)?.monthlyCents || 0;
-  return `<section class="panel"><h3>Scanner subscription · ${esc(billing.planName)}</h3><p class="muted">Phone scanning is included. A higher monthly plan unlocks more scanner types, and a locked scanner cannot be registered or used.</p>${billing.plans.map((plan) => `<div class="countrow"><div><strong>${esc(plan.name)} · ${esc(plan.label)} / month</strong><div class="muted">${esc(plan.summary)}</div><div class="smalls">${esc(plan.scanners.join(", "))}</div></div>${plan.current ? `<span class="pill green">Current</span>` : plan.monthlyCents > current && S.user.role === "owner" ? btn("Subscribe", `upgrade:${plan.id}`, "green") : ""}</div>`).join("")}</section>`;
+  return `<section class="panel"><h3>Scanner subscription · ${esc(billing.planName)}</h3><p class="muted">Phone scanning is included. A higher monthly plan unlocks more scanner types, and a locked scanner cannot be registered or used.</p>${billing.portal && S.user.role === "owner" ? `<div class="modalactions">${btn("Manage billing", "billing-portal")}</div>` : ""}${billing.plans.map((plan) => `<div class="countrow"><div><strong>${esc(plan.name)} · ${esc(plan.label)} / month</strong><div class="muted">${esc(plan.summary)}</div><div class="smalls">${esc(plan.scanners.join(", "))}</div></div>${plan.current ? `<span class="pill green">Current</span>` : plan.monthlyCents > current && S.user.role === "owner" ? btn("Subscribe", `upgrade:${plan.id}`, "green") : ""}</div>`).join("")}</section>`;
 }
 function devices() {
   return header("Hardware", "Devices", "A scanner can be registered and used only when the company plan includes that type.", allow("devices") ? btn("+ Register device", "new-device", "green") : "") +
@@ -200,11 +209,26 @@ function intelligence() {
   return header("Techne Intelligence", "Recommendations", "Answers come from the stock ledger, count snapshots, and custody dates.", btn("Refresh", "refresh-intel", "green")) +
     (intel ? `<p class="muted">${esc(intel.method)}</p><div class="intel-grid"><div><section class="panel"><h3>What to do next</h3>${intel.recommendations.map((item) => `<div class="countrow"><div><strong>${esc(item.title)}</strong><div class="muted">${esc(item.detail)}</div></div><span class="pill ${item.severity === "high" ? "red" : item.severity === "medium" ? "orange" : ""}">${esc(item.severity)}</span></div>`).join("") || empty("No recommendations", "The books look quiet.")}</section><section class="panel"><h3>Discrepancy investigations</h3>${intel.discrepancies.map((item) => `<div class="countrow"><div><strong>${esc(item.name)}</strong><div class="muted">${esc(item.narrative)}</div></div><span class="pill ${item.variance ? "orange" : ""}">${item.variance > 0 ? "+" : ""}${esc(item.variance)}</span></div>`).join("") || empty("No discrepancies", "Approved counts with a residual variance show up here.")}</section></div><div><section class="panel"><h3>Demand cover</h3><div class="tablewrap"><table><thead><tr><th>SKU</th><th>Daily use</th><th>Days cover</th></tr></thead><tbody>${intel.forecast.map((item) => `<tr><td><strong>${esc(item.sku)}</strong><div class="smalls">${esc(item.note)}</div></td><td>${item.dailyUse ?? "—"}</td><td>${item.daysOfCover ?? "—"}</td></tr>`).join("")}</tbody></table></div></section><section class="panel"><h3>Ask</h3><form id="askform"><div class="field"><label for="question">Question</label><input id="question" name="question" placeholder="Which assets are overdue?" required></div><button class="btn green" type="submit">Ask</button></form>${S.answer ? `<div class="answer">${esc(S.answer)}</div>` : ""}</section></div></div>` : `<section class="panel"><p class="muted">Open this page online once to cache the latest recommendations for offline reading.</p>${btn("Load recommendations", "refresh-intel", "green")}</section>`);
 }
+function picking() {
+  const waves = S.data.waves || [];
+  const orders = S.data.orders || [];
+  const active = waves.find((wave) => wave.status === "released" || wave.status === "picking");
+  const next = active?.next;
+  return header("Warehouse", "Directed picking", "A wave sorts open orders by aisle, shelf, rack, and bin. The next line is the only one a scan will accept.", allow("picking") ? btn("New order", "new-order", "green") + btn("Release wave", "release-wave") : "") +
+    (next ? `<section class="panel"><h3>Next location</h3><div class="countrow"><div><strong>${esc(next.location)}</strong><div class="muted">${esc(next.sku)} · ${esc(next.name)} · pick ${next.remaining}</div></div>${btn("Confirm scan", `pick:${active.id}`, "green")}${btn("Short", `short:${active.id}`)}</div><p class="muted">Scan ${esc(next.sku)} with the camera, the USB wedge, or the confirm button.</p></section>` : `<section class="panel">${empty("No open pick", "Create an order, then release a wave.")}</section>`) +
+    `<section class="panel"><h3>Orders</h3>${orders.map((order) => `<div class="countrow"><div><strong>${esc(order.source)} · ${esc(order.status)}</strong><div class="muted">${order.lines.map((line) => `${esc(line.sku)} × ${line.qty}`).join(", ")}</div></div></div>`).join("") || empty("No orders", "POS and ERP orders appear here too.")}</section>` +
+    `<section class="panel"><h3>Waves</h3>${waves.map((wave) => `<div class="countrow"><div><strong>${esc(wave.name)}</strong><div class="muted">${wave.lines.length} lines · ${esc(wave.status)}</div></div>${wave.status === "released" ? btn("Cancel", `cancel-wave:${wave.id}`) : ""}</div>`).join("") || empty("No waves", "Releasing a wave sequences every open order at this branch.")}</section>`;
+}
+function channels() {
+  const rows = S.data.channels || [];
+  return header("Connections", "Accounting and messages", "Xero, Sage, Pastel, POS, ERP, SMS, and WhatsApp. Secrets are shown once and are not stored in this browser.", allow("company") ? "" : "") +
+    `<section class="panel">${rows.map((item) => `<div class="countrow"><div><strong>${esc(item.name)}</strong><div class="muted">${esc(item.summary)}</div><div class="smalls">${item.connected ? "Connected" : "Not connected"}${item.lastError ? ` · ${esc(item.lastError)}` : ""}${item.webhookPath ? ` · ${esc(item.webhookPath)}` : ""}</div></div><div>${item.connected ? btn("Sync", `sync:${item.provider}`, "green") + btn("Disconnect", `disconnect:${item.provider}`) : btn("Connect", `connect:${item.provider}`, "green")}</div></div>`).join("") || empty("No connections", "Open this page online to load them.")}</section>`;
+}
 function morePage() {
   const items = visibleNav().filter((item) => !["dashboard", "assets", "stocktakes", "alerts"].includes(item[0]));
   return header("Menu", "More", "The rest of the workspace.") + `<section class="panel"><div class="shortcuts">${items.map((item) => `<button class="shortcut" data-nav="${item[0]}"><strong>${esc(item[1])}</strong></button>`).join("")}</div></section>`;
 }
-const pages = { dashboard, assets, inventory, stocktakes, schedules, scanner, activity, alerts, devices, branches, team, intelligence, conflicts, operations: () => TechneOps.page(), more: morePage };
+const pages = { dashboard, assets, inventory, stocktakes, schedules, scanner, activity, alerts, devices, branches, team, intelligence, conflicts, picking, channels, operations: () => TechneOps.page(), more: morePage };
 
 function formModal(title, sub, body, submit = "Save") {
   return `<div class="modalshade"><div class="modal"><h2>${title}</h2><p class="sub">${sub}</p><form id="actionform"><div class="formgrid">${body}</div><div class="modalactions"><button type="button" class="btn light" data-act="close">Cancel</button><button class="btn green" type="submit">${submit}</button></div></form></div></div>`;
@@ -273,18 +297,24 @@ function modalHtml() {
     if (!item) return "";
     return formModal("Apply scan rows", `${item.lineCount} rows from ${esc(item.name)}. Matching is case-insensitive and adds to the current count.`, select("stocktakeId", "Open count", open.map((row) => ({ value: row.id, label: row.name }))), "Apply to count");
   }
+  if (S.modal === "new-order") {
+    const options = S.data.products.map((product) => ({ value: product.sku, label: `${product.sku} · ${product.name}` }));
+    return formModal("Sales order", "This becomes demand for the next wave. The wave walks locations in aisle order.", branchOptions() + select("sku", "SKU", options) + field("qty", "Quantity", "number", "1", 'min="1" required'), "Create order");
+  }
+  if (S.modal === "connect-phone") return formModal(S.connectProvider === "whatsapp" ? "WhatsApp" : "SMS", "Overdue assets are sent to this number. The provider credentials stay on the server.", field("phone", "Phone", "tel", "", 'placeholder="+27820000000" required'), "Connect");
+  if (S.modal === "connect-erp") return formModal("ERP", "Receipts and orders are signed with the secret shown after you connect. Sync posts on-hand quantities to this webhook.", field("webhookUrl", "Webhook URL", "url", "", 'placeholder="https://erp.example/techne"'), "Connect");
   if (S.modal?.startsWith("stocktake:")) {
     const item = S.data.stocktakes.find((row) => row.id === S.modal.slice(10));
     if (!item) return "";
     const counted = item.lines.filter((line) => line.counted !== null).length;
     const recon = S.recon?.stocktakeId === item.id ? S.recon.items : [];
-    return `<div class="modalshade"><div class="modal"><h2>${esc(item.name)}</h2><p class="sub">${item.lines.length} products · ${counted} counted · ${esc(item.status)} · ${esc(employeeName(item.assignedEmployeeId))}</p><div class="progress" style="margin:16px 0"><div style="width:${item.lines.length ? 100 * counted / item.lines.length : 0}%"></div></div><form id="countform">${item.status === "active" ? `<div class="toolbar"><input name="barcode" class="search" placeholder="SKU or barcode" aria-label="Product barcode"><button class="btn light" type="button" data-act="lookup:${item.id}">Add scan</button></div><div id="scanmessage" class="muted">A matching SKU adds 1 to that line.</div>` : ""}${item.lines.map((line) => {
+    return `<div class="modalshade"><div class="modal"><h2>${esc(item.name)}</h2><p class="sub">${item.lines.length} products · ${counted} counted · ${esc(item.status)} · ${esc(employeeName(item.assignedEmployeeId))}</p><div class="progress" style="margin:16px 0"><div style="width:${item.lines.length ? 100 * counted / item.lines.length : 0}%"></div></div><form id="countform">${item.status === "active" ? `<div class="toolbar"><input name="barcode" class="search" placeholder="SKU or barcode" aria-label="Product barcode"><button class="btn light" type="button" data-act="lookup:${item.id}">Add scan</button><button class="btn light" type="button" data-act="scan-count:${item.id}">Camera</button></div><div id="scanmessage" class="muted">A matching SKU adds 1 to that line. The camera works without BarcodeDetector.</div>` : ""}${item.lines.map((line) => {
       const product = S.data.products.find((row) => row.id === line.productId);
       const explained = recon.find((row) => row.productId === line.productId);
       return `<div class="countrow"><div><strong>${esc(line.name || product?.name || "Product")}</strong><div class="muted">${esc(line.sku || product?.sku || "")}${item.status === "active" ? "" : ` · Snapshot ${line.expected}`}</div>${explained ? `<div class="smalls">${esc(explained.narrative)}</div>` : item.status === "approved" && line.variance !== null ? `<div class="smalls">Variance posted: ${line.variance}</div>` : ""}</div><div class="stepper">${item.status === "active" ? `<button type="button" data-act="minus:${item.id}:${line.productId}">−</button><input type="number" min="0" data-count="${item.id}:${line.productId}" value="${line.counted ?? ""}" placeholder="—"><button type="button" data-act="plus:${item.id}:${line.productId}">+</button>` : `<strong>${line.counted ?? "—"}</strong>`}</div></div>`;
     }).join("")}<div class="modalactions"><button type="button" class="btn light" data-act="close">Close</button>${item.status === "active" ? `<button type="button" class="btn green" data-act="submit-count:${item.id}" ${item.lines.length && counted === item.lines.length ? "" : "disabled"}>Submit for review</button>` : ""}${item.status === "completed" && allow("approve") ? `<button type="button" class="btn green" data-act="approve-count:${item.id}">Approve adjustments</button>` : ""}</div></form>${item.status === "completed" ? `<div class="warn">Approval posts the residual after movements during the count. ${S.user.role === "owner" ? "Owners can approve a count they submitted." : "Someone other than the person who submitted it must approve."}</div>` : ""}</div></div>`;
   }
-  if (S.modal === "scan-qr") return `<div class="modalshade"><div class="modal"><h2>Scan asset QR</h2><p class="sub">Use the phone camera or type the asset id.</p><video id="scanvideo" autoplay playsinline muted style="width:100%;max-height:240px;background:#101d31;border-radius:12px"></video><p class="muted" id="camstatus">Camera starts on supported browsers over HTTPS or localhost.</p><form id="manualasset"><div class="field"><label>Asset ID</label><input name="id" placeholder="TT-AST-001" required></div><div class="modalactions"><button type="button" class="btn light" data-act="close">Close</button><button class="btn green" type="submit">Open asset</button></div></form></div></div>`;
+  if (S.modal === "scan-qr") return `<div class="modalshade"><div class="modal"><h2>Scan a code</h2><p class="sub">QR, Code 128, and EAN-13. Browsers without BarcodeDetector use the built-in decoder.</p><video id="scanvideo" autoplay playsinline muted style="width:100%;max-height:240px;background:#101d31;border-radius:12px"></video><p class="muted" id="camstatus">Starting the camera.</p><form id="manualasset"><div class="field"><label>Code</label><input name="id" placeholder="TT-AST-001 or a SKU" required></div><div class="modalactions"><button type="button" class="btn light" data-act="close">Close</button><button class="btn green" type="submit">Use code</button></div></form></div></div>`;
   return "";
 }
 
@@ -296,37 +326,86 @@ function stopCamera() {
 }
 async function startCamera() {
   const statusNode = document.getElementById("camstatus");
-  if (!("BarcodeDetector" in window) || !navigator.mediaDevices?.getUserMedia) {
-    if (statusNode) statusNode.textContent = "Camera QR detection is not supported here. Enter the asset id.";
+  if (!navigator.mediaDevices?.getUserMedia) {
+    if (statusNode) statusNode.textContent = "This browser has no camera. Type the code.";
     return;
   }
   try {
-    const detector = new BarcodeDetector({ formats: ["qr_code"] });
+    const formats = ["qr_code", "code_128", "ean_13", "ean_8", "upc_a", "upc_e"];
+    let detector = null;
+    if ("BarcodeDetector" in window) {
+      try { detector = new BarcodeDetector({ formats }); } catch { detector = null; }
+    }
     cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
     const video = document.getElementById("scanvideo");
     if (!video || S.modal !== "scan-qr") return stopCamera();
     video.srcObject = cameraStream;
     await video.play();
-    if (statusNode) statusNode.textContent = "Point the camera at an asset QR label.";
+    if (statusNode) statusNode.textContent = detector ? "Point the camera at a QR or barcode." : "Point the camera at a QR or barcode. Using the built-in decoder.";
+    const canvas = document.createElement("canvas");
     let busy = false;
     cameraTimer = setInterval(async () => {
       if (busy || !video.videoWidth) return;
       busy = true;
       try {
-        const codes = await detector.detect(video);
-        if (codes.length) openAssetCode(codes[0].rawValue);
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.drawImage(video, 0, 0);
+        let value = "";
+        if (detector) {
+          const codes = await detector.detect(canvas);
+          value = codes[0]?.rawValue || "";
+        }
+        if (!value && globalThis.TechneSymbology) {
+          const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          value = TechneSymbology.readImage(image.data, image.width, image.height) || "";
+        }
+        if (value) applyBarcode(value);
       } catch { /* keep scanning */ } finally { busy = false; }
-    }, 400);
+    }, 350);
   } catch {
-    if (statusNode) statusNode.textContent = "Camera unavailable. Enter the asset id.";
+    if (statusNode) statusNode.textContent = "Camera unavailable. Type the code.";
     stopCamera();
   }
 }
+function applyBarcode(code) {
+  const value = String(code || "").trim();
+  if (!value) return;
+  stopCamera();
+  if (S.scanFor) {
+    const stocktakeId = S.scanFor;
+    S.scanFor = "";
+    const stocktake = S.data.stocktakes.find((item) => item.id === stocktakeId);
+    const key = value.toLowerCase();
+    const line = stocktake?.lines.find((item) => (item.sku || "").toLowerCase() === key || S.data.products.find((product) => product.id === item.productId && product.sku.toLowerCase() === key));
+    S.modal = `stocktake:${stocktakeId}`;
+    if (!line) {
+      S.banner = "Unknown or out-of-scope barcode. No count changed.";
+      render();
+      return;
+    }
+    setCount(stocktake.id, line.productId, (line.counted ?? 0) + 1);
+    S.banner = `Counted ${line.sku || value}.`;
+    render();
+    return;
+  }
+  const wave = (S.data.waves || []).find((item) => item.status === "released" || item.status === "picking");
+  if (S.route === "picking" && wave?.next && value.toLowerCase() === wave.next.sku.toLowerCase()) {
+    S.modal = null;
+    run("POST", `/api/waves/${wave.id}/pick`, { barcode: value, qty: wave.next.remaining }, "waves");
+    return;
+  }
+  openAssetCode(value);
+}
 function openAssetCode(code) {
-  const asset = S.data.assets.find((item) => item.publicId === code || item.id === code);
+  const text = String(code || "").trim();
+  const asset = S.data.assets.find((item) => item.publicId === text || item.id === text || item.qrPayload === text || (item.publicId && text.startsWith(`${item.publicId}.`)));
   if (!asset) {
     const statusNode = document.getElementById("camstatus");
     if (statusNode) statusNode.textContent = "That code is not one of your assets.";
+    S.banner = "That code is not one of your assets.";
+    render();
     return;
   }
   stopCamera();
@@ -338,7 +417,7 @@ async function refresh() {
   const data = await TechneAPI.send("GET", "/api/sync/pull");
   const pending = await TechneIDB.outbox();
   const blocked = new Set(pending.map((item) => item.bucket));
-  for (const key of ["branches", "employees", "assets", "products", "stocktakes", "schedules", "devices", "imports", "events", "audits", "notifications", "contractors", "reservations"]) {
+  for (const key of ["branches", "employees", "assets", "products", "stocktakes", "schedules", "devices", "imports", "events", "audits", "notifications", "contractors", "reservations", "orders", "waves", "channels"]) {
     if (!blocked.has(key)) S.data[key] = data[key] || [];
   }
   S.data.company = data.company;
@@ -519,7 +598,7 @@ async function onSubmit(event) {
       const result = await TechneAPI.send("POST", "/api/setup", dataOf(form));
       return enter(result.user);
     }
-    if (form.id === "manualasset") return openAssetCode(String(new FormData(form).get("id") || "").trim());
+    if (form.id === "manualasset") return applyBarcode(String(new FormData(form).get("id") || "").trim());
     if (form.id === "askform") {
       const result = await TechneAPI.send("POST", "/api/intelligence/ask", { question: new FormData(form).get("question") });
       S.answer = result.answer;
@@ -554,6 +633,18 @@ async function onSubmit(event) {
     if (modal === "billing") {
       S.modal = null;
       return run("POST", "/api/billing/demo", { checkoutId: S.checkout?.checkoutId }, "devices");
+    }
+    if (modal === "new-order") {
+      S.modal = null;
+      return run("POST", "/api/orders", { sku: body.sku, qty: Number(body.qty), branchId: body.branchId }, "orders");
+    }
+    if (modal === "connect-phone" || modal === "connect-erp") {
+      const payload = { provider: modal === "connect-erp" ? "erp" : S.connectProvider, origin: location.origin, phone: body.phone, webhookUrl: body.webhookUrl };
+      S.modal = null;
+      const result = await TechneAPI.send("POST", "/api/channels/connect", payload);
+      S.banner = result.secret ? `${payload.provider.toUpperCase()} secret, shown once: ${result.secret}` : "Connected.";
+      await refresh();
+      return render();
     }
     if (modal?.startsWith("apply:")) {
       const id = modal.slice(6);
@@ -614,7 +705,7 @@ function download(name, rows) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 async function action(name) {
-  if (["new-asset", "new-product", "new-checkout", "quick-checkin", "new-stocktake", "new-schedule", "new-branch", "new-employee", "new-device", "import-csv", "scan-qr", "account", "company"].includes(name) || name.startsWith("asset:") || name.startsWith("product:") || name.startsWith("apply:")) {
+  if (["new-asset", "new-product", "new-checkout", "quick-checkin", "new-stocktake", "new-schedule", "new-branch", "new-employee", "new-device", "new-order", "import-csv", "scan-qr", "account", "company", "connect-phone", "connect-erp"].includes(name) || name.startsWith("asset:") || name.startsWith("product:") || name.startsWith("apply:")) {
     S.modal = name;
     S.recon = null;
     render();
@@ -631,6 +722,79 @@ async function action(name) {
       try { S.recon = await TechneAPI.send("GET", `/api/stocktakes/${id}/reconciliation`); render(); } catch (error) { S.banner = error.message; render(); }
     }
     return;
+  }
+  if (name === "billing-portal") {
+    try {
+      const result = await TechneAPI.send("POST", "/api/billing/portal", { origin: location.origin });
+      if (result.url) location.href = result.url;
+    } catch (error) { S.banner = error.message; render(); }
+    return;
+  }
+  if (name === "usb-wedge") {
+    const on = localStorage.getItem("techne-wedge") === "1";
+    localStorage.setItem("techne-wedge", on ? "0" : "1");
+    S.banner = on ? "USB keyboard wedge is off." : "USB keyboard wedge is on. Fast scans ending in Enter are captured.";
+    return render();
+  }
+  if (name === "connect-hid") {
+    if (globalThis.TechneHid) return TechneHid();
+    S.banner = "USB HID is not available in this browser.";
+    return render();
+  }
+  if (name === "release-wave") return run("POST", "/api/waves", { branchId: S.user.branchId }, "waves");
+  if (name.startsWith("cancel-wave:")) return run("POST", `/api/waves/${name.slice(12)}/cancel`, {}, "waves");
+  if (name.startsWith("pick:")) {
+    const wave = (S.data.waves || []).find((item) => item.id === name.slice(5));
+    const barcode = wave?.next?.sku;
+    if (!barcode) return;
+    return run("POST", `/api/waves/${wave.id}/pick`, { barcode, qty: wave.next.remaining }, "waves");
+  }
+  if (name.startsWith("short:")) {
+    const wave = (S.data.waves || []).find((item) => item.id === name.slice(6));
+    const taken = Number(prompt(`How many of ${wave?.next?.sku || "the item"} were picked?`, "0"));
+    if (!Number.isInteger(taken) || taken < 0) return;
+    return run("POST", `/api/waves/${wave.id}/pick`, { barcode: wave.next.sku, qty: taken, short: true }, "waves");
+  }
+  if (name.startsWith("scan-count:")) {
+    S.scanFor = name.slice(11);
+    S.modal = "scan-qr";
+    return render();
+  }
+  if (name.startsWith("connect:")) {
+    const provider = name.slice(8);
+    if (provider === "sms" || provider === "whatsapp") {
+      S.connectProvider = provider;
+      S.modal = "connect-phone";
+      return render();
+    }
+    if (provider === "erp") { S.modal = "connect-erp"; return render(); }
+    try {
+      const result = await TechneAPI.send("POST", "/api/channels/connect", { provider, origin: location.origin });
+      if (result.url) { location.href = result.url; return; }
+      S.banner = result.secret ? `${provider.toUpperCase()} secret, shown once: ${result.secret}` : "Connected.";
+      await refresh();
+    } catch (error) { S.banner = error.message; }
+    return render();
+  }
+  if (name.startsWith("sync:")) {
+    const provider = name.slice(5);
+    try {
+      const result = await TechneAPI.send("POST", `/api/channels/${provider}/sync`, {});
+      if (result.csv) {
+        const blob = new Blob([result.csv], { type: "text/csv" });
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = result.filename || "pastel-inventory.csv";
+        link.click();
+      }
+      S.banner = result.sent ? "Test message sent." : result.count !== undefined ? `Synced ${result.count} items.` : "Sync finished.";
+      await refresh();
+    } catch (error) { S.banner = error.message; }
+    return render();
+  }
+  if (name.startsWith("disconnect:")) {
+    if (!confirm("Disconnect this provider?")) return;
+    return run("POST", `/api/channels/${name.slice(11)}/disconnect`, {}, "channels");
   }
   if (name.startsWith("upgrade:")) {
     if (S.user.role !== "owner") { S.banner = "Only an owner can change the scanner subscription."; return render(); }
@@ -788,6 +952,11 @@ setInterval(() => { if (S.user && navigator.onLine) flush(); }, 20000);
 
 async function boot() {
   if (localStorage.getItem("techne-theme") === "dark") document.body.classList.add("theme-dark");
+  const params = new URLSearchParams(location.search);
+  if (params.get("connected") === "error") S.banner = "The provider connection was not completed.";
+  else if (params.get("connected")) S.banner = `${params.get("connected")} is connected.`;
+  else if (params.get("billing") === "portal") S.banner = "Billing portal closed.";
+  else if (params.get("billing") === "success") S.banner = "Card checkout returned. The plan updates when Stripe confirms it.";
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
   if (navigator.storage?.estimate) {
     const estimate = await navigator.storage.estimate().catch(() => null);
@@ -813,5 +982,5 @@ async function boot() {
   }
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(() => {});
 }
-globalThis.Techne = { S, esc, allow, btn, field, select, empty, header, branchName, today, fmt, status, run };
+globalThis.Techne = { S, esc, allow, btn, field, select, empty, header, branchName, today, fmt, status, run, render, applyBarcode };
 boot();

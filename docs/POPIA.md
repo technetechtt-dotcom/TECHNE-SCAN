@@ -4,7 +4,7 @@ This note describes the technical controls in Techne Scan. It is not a legal POP
 
 ## What the app stores
 
-Company records include employee names and emails, asset custody, stock quantities, scanner imports, and optional condition photographs. Passwords are stored as scrypt hashes. Session tokens and MFA backup codes are stored only as SHA-256 hashes. MFA secrets stay on the employee row and are not sent to the browser in the sync payload. Condition photographs are not included in the offline sync copy; an authorised user fetches one photo at a time.
+Company records include employee names, emails, optional phone numbers used for SMS or WhatsApp, asset custody, stock quantities, scanner imports, and optional condition photographs. If a company connects Xero, Sage, a POS, or an ERP, the server stores that provider's tokens or webhook secret on the company row. Those secrets are not copied into the offline sync. Passwords are stored as scrypt hashes. Session tokens and MFA backup codes are stored only as SHA-256 hashes. MFA secrets stay on the employee row and are not sent to the browser in the sync payload. Condition photographs are not included in the offline sync copy; an authorised user fetches one photo at a time.
 
 ## Who can see it
 

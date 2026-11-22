@@ -1581,7 +1581,16 @@ export async function pull(user) {
     notifications,
     reservations: await listReservations(user),
     contractors: (await query(`SELECT id, name, company_name AS "companyName" FROM contractors WHERE company_id = $1 AND active ORDER BY name`, [user.companyId])),
+    ...(await fulfillmentSnapshot(user)),
   };
+}
+
+async function fulfillmentSnapshot(user) {
+  const { listPicking } = await import("./picking.js");
+  const { listChannels } = await import("./channels.js");
+  const picking = capsFor(user.role).includes("picking") ? await listPicking(user) : { orders: [], waves: [] };
+  const channels = capsFor(user.role).includes("company") ? await listChannels(user) : [];
+  return { orders: picking.orders, waves: picking.waves, channels };
 }
 
 export async function seedDemo() {

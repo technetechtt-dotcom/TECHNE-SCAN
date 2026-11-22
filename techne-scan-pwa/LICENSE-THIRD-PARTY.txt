@@ -7,3 +7,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 Code 128 bar patterns in code128.js are adapted from JsBarcode by Johan Lindell and contributors, MIT License.
 https://github.com/lindell/JsBarcode
+
+jsQR by Cozmo and contributors, Apache License 2.0.
+https://github.com/cozmo/jsQR
+The decoder in vendor/jsQR.js is the 1.4.0 browser build. Copyright notices in that repository apply. The license is the Apache License, Version 2.0. A copy is published at https://www.apache.org/licenses/LICENSE-2.0
+

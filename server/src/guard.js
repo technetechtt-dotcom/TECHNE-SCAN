@@ -34,6 +34,12 @@ const BACKUP_TABLES = [
   "device_events",
   "goods_receipts",
   "stock_transfers",
+  "integrations",
+  "integration_events",
+  "sales_orders",
+  "sales_order_lines",
+  "pick_waves",
+  "pick_lines",
 ];
 
 function stable(value) {
@@ -46,7 +52,7 @@ function stable(value) {
 
 export function log(level, message, fields = {}) {
   const safe = { ...fields };
-  for (const key of ["password", "token", "secret", "authorization", "mfa_secret", "password_hash"]) delete safe[key];
+  for (const key of ["password", "token", "secret", "authorization", "mfa_secret", "password_hash", "access_token", "refresh_token"]) delete safe[key];
   console.log(JSON.stringify({ time: new Date().toISOString(), level, message, ...safe }));
 }
 
@@ -223,6 +229,8 @@ export async function housekeeping() {
   await query(`DELETE FROM idempotency_keys WHERE created_at < now() - interval '30 days'`);
   await query(`DELETE FROM mfa_challenges WHERE expires_at < now()`);
   await query(`DELETE FROM password_resets WHERE expires_at < now() - interval '1 day'`);
+  await query(`DELETE FROM integration_events WHERE at < now() - interval '365 days'`);
+  await query(`DELETE FROM channel_nonces WHERE expires_at < now()`);
   await query(`UPDATE companies SET plan = 'starter', plan_status = 'cancelled' WHERE plan <> 'starter' AND plan_until IS NOT NULL AND plan_until < now()`);
   await query(`UPDATE asset_reservations SET status = 'expired' WHERE status = 'booked' AND ends_on < CURRENT_DATE`);
   await query(

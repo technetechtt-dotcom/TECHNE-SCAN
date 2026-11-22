@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { query, tx } from "./db.js";
-import { assertScannerAllowed, confirmDemoCheckout, startCheckout } from "./billing.js";
+import { assertScannerAllowed, confirmDemoCheckout, portalSession, startCheckout } from "./billing.js";
 import { bad } from "./errors.js";
 import { writeBackup } from "./guard.js";
 import { readLabel, signLabel } from "./labels.js";
@@ -850,6 +850,7 @@ export function opsRoutes() {
     ["PATCH", /^\/api\/company\/settings$/, (user, body) => updateSettings(user, body)],
     ["POST", /^\/api\/admin\/backup$/, (user) => backupNow(user)],
     ["POST", /^\/api\/billing\/checkout$/, (user, body) => startCheckout(user, body)],
+    ["POST", /^\/api\/billing\/portal$/, (user, body) => portalSession(user, body)],
     ["POST", /^\/api\/billing\/demo$/, (user, body) => confirmDemoCheckout(user, body)],
   ];
 }

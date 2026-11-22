@@ -61,7 +61,7 @@ function effective(row) {
 }
 
 async function companyRow(companyId) {
-  const rows = await query(`SELECT plan, plan_status, plan_until FROM companies WHERE id = $1`, [companyId]);
+  const rows = await query(`SELECT plan, plan_status, plan_until, stripe_customer_id FROM companies WHERE id = $1`, [companyId]);
   if (!rows[0]) throw bad(404, "Company not found.");
   return rows[0];
 }
@@ -74,6 +74,7 @@ export async function billingView(companyId) {
     planName: plan.name,
     status: row.plan_status || "active",
     until: row.plan_until ? new Date(row.plan_until).toISOString() : null,
+    portal: Boolean(row.stripe_customer_id) && Boolean(process.env.STRIPE_SECRET_KEY),
     scanners: plan.scanners,
     plans: PLANS.map((item) => publicPlan(item, plan.id)),
   };
@@ -189,6 +190,16 @@ function stripeSignatureOk(raw, header) {
 export async function applyStripeEvent(raw, header) {
   if (!stripeSignatureOk(raw, header)) throw bad(400, "Stripe signature was rejected.");
   const event = JSON.parse(raw.toString("utf8"));
+  if (event.type === "customer.subscription.deleted") {
+    const customer = event.data?.object?.customer;
+    if (customer) {
+      await query(
+        `UPDATE companies SET plan = 'starter', plan_status = 'cancelled', plan_until = now() WHERE stripe_customer_id = $1`,
+        [String(customer)],
+      );
+    }
+    return { ok: true };
+  }
   if (event.type !== "checkout.session.completed") return { ok: true, ignored: true };
   const session = event.data?.object || {};
   const checkoutId = session.metadata?.checkoutId || session.client_reference_id;
@@ -196,5 +207,31 @@ export async function applyStripeEvent(raw, header) {
   if (!rows[0]) throw bad(404, "That checkout was not found.");
   if (rows[0].status === "paid") return { ok: true, duplicate: true };
   await activate(rows[0].company_id, rows[0].plan, rows[0].id);
+  const customer = session.customer || "";
+  if (customer) {
+    await query(
+      `UPDATE companies SET stripe_customer_id = $2 WHERE id = $1 AND stripe_customer_id = ''`,
+      [rows[0].company_id, String(customer)],
+    );
+  }
   return { ok: true };
+}
+
+export async function portalSession(user, input, fetcher = globalThis.fetch) {
+  assertCap(user, "company");
+  assertFreshMfa(user);
+  if (user.role !== "owner") throw bad(403, "Only an owner can open the billing portal.");
+  if (!process.env.STRIPE_SECRET_KEY) throw bad(503, "Card billing is not configured.");
+  const row = await companyRow(user.companyId);
+  if (!row.stripe_customer_id) throw bad(409, "Subscribe with a card before opening the billing portal.");
+  const origin = String(input.origin || "").replace(/\/$/, "");
+  if (!/^https?:\/\//.test(origin)) throw bad(400, "The billing portal needs the app address.");
+  const response = await fetcher("https://api.stripe.com/v1/billing_portal/sessions", {
+    method: "POST",
+    headers: { authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}`, "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ customer: row.stripe_customer_id, return_url: `${origin}/?billing=portal` }),
+  });
+  const session = await response.json();
+  if (!response.ok || !session.url) throw bad(502, "The billing portal could not be opened.");
+  return { url: session.url };
 }

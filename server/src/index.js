@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { applyStripeEvent } from "./billing.js";
+import { completeOAuth, receiveErp, receivePos } from "./channels.js";
 import { databaseMode, initDb } from "./db.js";
 import { bad } from "./errors.js";
 import { alertError, log, rateLimit, runIdempotent } from "./guard.js";
@@ -162,6 +163,31 @@ app.post("/api/invitations/accept", async (req, res, next) => {
 app.post("/api/billing/stripe", async (req, res, next) => {
   try {
     res.json(await applyStripeEvent(req.rawBody || Buffer.from(""), req.get("stripe-signature")));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/channels/:provider/callback", async (req, res, next) => {
+  try {
+    const provider = req.params.provider === "sage" ? "sage" : "xero";
+    if (req.params.provider !== provider) return res.redirect("/?connected=error");
+    await completeOAuth(provider, req.query.code, req.query.state);
+    res.redirect(`/?connected=${provider}`);
+  } catch {
+    res.redirect("/?connected=error");
+  }
+});
+
+app.post("/api/hooks/:provider", async (req, res, next) => {
+  try {
+    await rateLimit(`hook:${clientIp(req)}`, 60, 60 * 1000);
+    const raw = req.rawBody || Buffer.from("");
+    const companyId = req.get("x-techne-company");
+    const signature = req.get("x-techne-signature");
+    if (req.params.provider === "pos") return res.json(await receivePos(companyId, raw, signature));
+    if (req.params.provider === "erp") return res.json(await receiveErp(companyId, raw, signature));
+    return res.status(404).json({ error: "That endpoint does not exist." });
   } catch (error) {
     next(error);
   }

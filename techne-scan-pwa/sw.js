@@ -1,5 +1,5 @@
-const CACHE = "techne-scan-v6";
-const ASSETS = ["./","./index.html","./app.js","./ops.js","./i18n.js","./queue.js","./styles.css","./manifest.webmanifest","./vendor/qr.js","./icons/icon.svg","./idb.js","./api.js","./code128.js"];
+const CACHE = "techne-scan-v7";
+const ASSETS = ["./","./index.html","./app.js","./ops.js","./i18n.js","./queue.js","./styles.css","./manifest.webmanifest","./vendor/qr.js","./vendor/jsQR.js","./icons/icon.svg","./idb.js","./api.js","./code128.js","./symbology.js","./scanner-input.js"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)));

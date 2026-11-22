@@ -13,11 +13,13 @@ import {
   scheduleCalendar,
   setReview,
 } from "./counts.js";
+import { channelRoutes } from "./channels.js";
 import { bad } from "./errors.js";
 import { runIdempotent } from "./guard.js";
 import { checkSchema } from "./schema.js";
 import { ask, summary } from "./intelligence.js";
 import { opsRoutes } from "./ops.js";
+import { pickingRoutes } from "./picking.js";
 import {
   applyImport,
   approveStocktake,
@@ -117,6 +119,8 @@ const routes = [
   ["POST", /^\/api\/schedules\/([^/]+)\/pause$/, (user, body, id) => pauseSchedule(user, id, body)],
   ["GET", /^\/api\/schedules\/calendar$/, (user) => scheduleCalendar(user)],
   ...opsRoutes(),
+  ...pickingRoutes(),
+  ...channelRoutes(),
 ];
 
 export async function handleProtected(user, method, path, body) {
